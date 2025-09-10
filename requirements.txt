@@ -1,0 +1,9 @@
+streamlit>=1.37.0
+gspread>=6.1.2
+google-auth>=2.31.0
+pandas>=2.2.2
+numpy>=1.26.4
+altair>=5.3.0
+python-dateutil>=2.9.0
+pytz>=2024.1
+openpyxl>=3.1.5
