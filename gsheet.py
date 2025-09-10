@@ -130,3 +130,54 @@ def read_records() -> pd.DataFrame:
     df.loc[need_total, "总价 (Total Cost)"] = df.loc[need_total, "数量 (Qty)"] * df.loc[need_total, "单价 (Unit Price)"]
 
     return df
+
+# 读取物品清单（主数据）
+# 会优先找这些工作表名：['库存产品', 'Content_tracker', '物品清单']
+def read_catalog():
+    ws_names_try = ["库存产品", "Content_tracker", "物品清单"]
+    ws = _get_ws()   # 只是为了拿到 spreadsheet 对象
+    sh = ws.spreadsheet
+
+    target = None
+    for name in ws_names_try:
+        try:
+            target = sh.worksheet(name)
+            break
+        except Exception:
+            continue
+    if target is None:
+        # 若没有主数据表，就返回空表（UI 会提示）
+        return pd.DataFrame(columns=["物品名","类型","单位","备注"])
+
+    df = pd.DataFrame(target.get_all_records())
+
+    # 常见列名映射（按你截图）
+    aliases = {
+        "物品名": "物品名",
+        "物品名称": "物品名",
+        "物品": "物品名",
+        "物品名称 (Item)": "物品名",
+
+        "类型": "类型",
+        "类别": "类型",
+        "分类": "类型",
+
+        "单位": "单位",
+        "备注": "备注"
+    }
+    for old, new in aliases.items():
+        if old in df.columns and new not in df.columns:
+            df[new] = df.pop(old)
+
+    # 只保留关键信息
+    keep = [c for c in ["物品名","类型","单位","备注"] if c in df.columns]
+    df = df[keep].copy()
+
+    # 清洗
+    for c in df.columns:
+        if c in ["物品名","类型","单位","备注"]:
+            df[c] = df[c].astype(str).str.strip()
+
+    # 过滤空物品名
+    df = df[df["物品名"].astype(bool)]
+    return df
