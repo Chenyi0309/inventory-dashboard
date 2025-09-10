@@ -8,12 +8,19 @@ import altair as alt
 # Choose backend (Google Sheets recommended)
 from gsheet import read_records, append_record, STATUS_VALUES
 
-import json, os
-# 如果放在 Secrets，就写一个临时文件给 gsheet.py 用
+# ====== 【替换开始】Secrets -> 写临时密钥文件 + 同步 SHEET_URL ======
+import json
+
+# 1) 如果 Secrets 里有 service_account，就写成临时文件给 gsheet.py 用
 if "service_account" in st.secrets:
     with open("service_account.json", "w") as f:
         json.dump(dict(st.secrets["service_account"]), f)
 
+# 2) 读取 INVENTORY_SHEET_URL（优先 Secrets，其次环境变量），并同步到环境变量
+sheet_url = st.secrets.get("INVENTORY_SHEET_URL", None) or os.getenv("INVENTORY_SHEET_URL", None)
+if sheet_url:
+    os.environ["INVENTORY_SHEET_URL"] = sheet_url  # 供 gsheet.py 使用
+# ====== 【替换结束】======
 
 st.set_page_config(page_title="库存管理 Dashboard", layout="wide")
 
@@ -22,9 +29,12 @@ st.caption("录入‘买入/剩余’，自动保存到表格，并实时生成�
 
 with st.sidebar:
     st.header("⚙️ 设置 / Setup")
-    st.write("请先在项目根目录放置 `service_account.json`，并设置环境变量 `INVENTORY_SHEET_URL` 指向你的 Google 表格 URL。")
-    sheet_url = os.getenv("INVENTORY_SHEET_URL", "(未设置)")
-    st.code(f"INVENTORY_SHEET_URL={sheet_url}")
+    st.write("请先在项目根目录放置 `service_account.json`（部署时由 Secrets 自动生成），并设置/填好 `INVENTORY_SHEET_URL`。")
+    # ====== 【替换开始】显示我们刚同步的 sheet_url，而不是只读环境变量 ======
+    st.code(f"INVENTORY_SHEET_URL={sheet_url or '(未设置)'}")
+    # ====== 【替换结束】======
+    if not sheet_url:
+        st.error("未检测到 INVENTORY_SHEET_URL。请在 Streamlit Cloud 的 App → Settings → Secrets 中设置。")
 
     st.markdown("---")
     st.write("**如何找到 URL?** 打开你的目标表格 → 浏览器地址栏完整 URL。")
