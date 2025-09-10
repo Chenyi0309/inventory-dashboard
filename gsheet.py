@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+import streamlit as st  # 用于缓存，降低 API 读频率（避免429）
 
 # ======== CONFIG ========
 SHEET_URL = os.getenv("INVENTORY_SHEET_URL", "").strip()  # paste Sheet URL or set env var
@@ -181,3 +182,22 @@ def read_catalog():
     # 过滤空物品名
     df = df[df["物品名"].astype(bool)]
     return df
+
+# ======== 读缓存包装 & 清缓存（为降低API频率，避免429） ========
+
+@st.cache_data(show_spinner=False, ttl=60)
+def read_records_cached() -> pd.DataFrame:
+    """缓存读取‘购入/剩余’ 60 秒。"""
+    return read_records()
+
+@st.cache_data(show_spinner=False, ttl=60)
+def read_catalog_cached() -> pd.DataFrame:
+    """缓存读取主数据（库存产品/Content_tracker/物品清单）60 秒。"""
+    return read_catalog()
+
+def bust_cache():
+    """手动清除缓存（在页面上做“刷新数据”按钮时调用）"""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
