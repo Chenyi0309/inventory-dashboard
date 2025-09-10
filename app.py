@@ -43,60 +43,101 @@ tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
 
 # ===================== 录入 =====================
 with tabs[0]:
-    st.subheader("录入新记录（保存到 ‘购入/剩余’ 工作表）")
+    st.subheader("录入新记录（三步：选择 → 批量填写 → 保存）")
 
-    # Load existing for dropdowns
+    # 1) 读取主数据（物品清单）
+    from gsheet import read_catalog
     try:
-        df_all = read_records()
+        catalog = read_catalog()
     except Exception as e:
-        st.error(f"读取表格失败：{e}")
+        st.error(f"读取物品清单失败：{e}")
         st.stop()
 
-    items = sorted([x for x in df_all["食材名称 (Item Name)"].dropna().unique() if x])
-    cats  = sorted([x for x in df_all["分类 (Category)"].dropna().unique() if x])
-    units = sorted([x for x in df_all["单位 (Unit)"].dropna().unique() if x])
+    if catalog.empty or not {"物品名","类型"}.issubset(set(catalog.columns)):
+        st.warning("未找到“库存产品/Content_tracker/物品清单”工作表，或缺少‘物品名/类型’列。请在你的表格增加主数据表。")
+        st.stop()
 
-    with st.form("entry_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        date = c1.date_input("日期 (Date)", pd.Timestamp.today())
-        status = c2.selectbox("状态 (Status)", STATUS_VALUES, index=0)
-        cat = c3.selectbox("分类 (Category)", options=[""] + cats, index=0, placeholder="可直接输入新分类")
+    # -------- Step A：三项选择 --------
+    c1, c2, c3 = st.columns(3)
+    sel_date   = c1.date_input("日期 (Date)", pd.Timestamp.today())
+    sel_type   = c2.selectbox("类型", ["食物类","清洁类","消耗品","饮品类"])
+    sel_status = c3.selectbox("状态 (Status)", ["买入","剩余"])
 
-        item = st.selectbox("食材名称 (Item Name)", options=[""] + items, index=0, placeholder="可直接输入新名称")
-        if not item:
-            item = st.text_input("或手动输入新‘食材名称’")
+    # 2) 根据类型过滤物品清单
+    items_df = catalog[catalog["类型"] == sel_type].copy().reset_index(drop=True)
+    if items_df.empty:
+        st.info("该类型下暂无物品。请先到主数据表中补充。")
+        st.stop()
 
-        c4, c5, c6 = st.columns(3)
-        qty = c4.number_input("数量 (Qty)", min_value=0.0, step=0.1)
-        unit = c5.selectbox("单位 (Unit)", options=[""] + units, index=0, placeholder="可直接输入新单位")
-        price = c6.number_input("单价 (Unit Price) — 仅‘买入’需要", min_value=0.0, step=0.01) if status == "买入" else 0.0
+    # 生成可填写表格（数量、单价、备注）
+    st.markdown("**在下表中为需要录入的物品填写数量（必填）与单价（仅买入时）**")
+    edit_df = items_df[["物品名","单位"]].copy()
+    edit_df["数量"] = 0.0
+    if sel_status == "买入":
+        edit_df["单价"] = 0.0
+    edit_df["备注"] = ""
 
-        notes = st.text_input("备注 (Notes)", "")
+    edited = st.data_editor(
+        edit_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "物品名": st.column_config.Column(disabled=True),
+            "单位": st.column_config.Column(disabled=True),
+            "数量": st.column_config.NumberColumn(step=0.1, min_value=0.0),
+            "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status=="买入" else None,
+        },
+        key="bulk_editor",
+    )
 
-        total = qty * price if status == "买入" else 0.0
-        st.caption(f"总价 (Total Cost): {total:.2f}" if status == "买入" else "总价 (Total Cost): （剩余无需填写）")
+    # 只保留填写了数量>0 的行
+    try_submit = st.button("✅ 批量保存到『购入/剩余』")
+    if try_submit:
+        if "数量" not in edited.columns:
+            st.error("请至少为一个物品填写‘数量’。")
+            st.stop()
 
-        submitted = st.form_submit_button("✅ 保存到 ‘购入/剩余’")
-        if submitted:
+        rows = edited.copy()
+        rows = rows[pd.to_numeric(rows["数量"], errors="coerce").fillna(0) > 0]
+
+        if rows.empty:
+            st.warning("你还没有为任何物品填写数量。")
+            st.stop()
+
+        ok, fail = 0, 0
+        for _, r in rows.iterrows():
+            qty   = float(r["数量"])
+            price = float(r["单价"]) if sel_status=="买入" and "单价" in r else None
+            total = (qty * price) if (sel_status=="买入" and price is not None) else None
+            unit  = str(r.get("单位","") or "")
+
             record = {
-                "日期 (Date)": pd.to_datetime(date).strftime("%Y-%m-%d"),
-                "食材名称 (Item Name)": item.strip(),
-                "分类 (Category)": (cat or "").strip(),
+                "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
+                "食材名称 (Item Name)": str(r["物品名"]).strip(),
+                "分类 (Category)": sel_type,             # 用类型作为分类
                 "数量 (Qty)": qty,
-                "单位 (Unit)": (unit or "").strip(),
-                "单价 (Unit Price)": price if status == "买入" else "",
-                "总价 (Total Cost)": total if status == "买入" else "",
-                "状态 (Status)": status,
-                "备注 (Notes)": notes.strip()
+                "单位 (Unit)": unit,
+                "单价 (Unit Price)": price if sel_status=="买入" else "",
+                "总价 (Total Cost)": total if sel_status=="买入" else "",
+                "状态 (Status)": sel_status,
+                "备注 (Notes)": str(r.get("备注","")).strip()
             }
+
             try:
                 append_record(record)
-                st.success("已保存！请到右侧‘库存统计’查看效果。")
-            except Exception as e:
-                st.error(f"保存失败：{e}")
+                ok += 1
+            except Exception:
+                fail += 1
 
-    st.markdown("—")
-    st.caption("提示：下拉框里没有想要的内容？直接在框里输入新值即可。")
+        if ok and not fail:
+            st.success(f"已成功写入 {ok} 条记录！")
+        elif ok and fail:
+            st.warning(f"部分成功：{ok} 条成功，{fail} 条失败。")
+        else:
+            st.error("保存失败，请检查表格权限与 Secrets 配置。")
+
+    st.caption("提示：单价只在‘买入’状态下需要填写；‘剩余’只统计数量。")
+
 
 # ===================== 统计 =====================
 with tabs[1]:
