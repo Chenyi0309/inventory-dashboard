@@ -135,7 +135,8 @@ with tabs[1]:
     try:
         from gsheet import bust_cache
     except Exception:
-        def bust_cache(): pass
+        def bust_cache():
+            pass
     colR1, colR2 = st.columns([1,3])
     if colR1.button("🔄 刷新数据", help="清空缓存并重新读取 Google Sheet"):
         bust_cache()
