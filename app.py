@@ -142,32 +142,84 @@ with tabs[0]:
 # ===================== 统计 =====================
 with tabs[1]:
     st.subheader("库存统计（自动根据最近 14 天使用量估算）")
+
+    # --- 刷新按钮，清除缓存，避免429 ---
+    from gsheet import read_records_cached, bust_cache
+    colR1, colR2 = st.columns([1,3])
+    if colR1.button("🔄 刷新数据", help="清空缓存并重新读取 Google Sheet"):
+        bust_cache()
+        st.experimental_rerun()
+
+    # --- 阈值设置（可调） ---
+    with st.expander("⚙️ 预警阈值设置", expanded=False):
+        warn_days = st.number_input("关注阈值（天）", min_value=1, max_value=60, value=7, step=1)
+        urgent_days = st.number_input("紧急阈值（天）", min_value=1, max_value=60, value=3, step=1)
+
     try:
-        df = read_records()
+        df = read_records_cached()
     except Exception as e:
         st.error(f"读取表格失败：{e}")
         st.stop()
 
-    stats = compute_stats(df)
+    stats = compute_stats(df)  # 仍然沿用你的 compute.py 逻辑
 
-    # KPI bar
+    # === 组装列顺序，名称与 Google 表一致 ===
+    # 将 NaN 转空串，方便显示
+    show = stats.copy()
+    for c in show.columns:
+        show[c] = show[c].astype("object")
+
+    # 计算“库存预警”
+    import pandas as pd
+    def badge(days):
+        x = pd.to_numeric(days, errors="coerce")
+        if pd.isna(x):
+            return ""
+        if x <= urgent_days:
+            return "🚨 立即下单"
+        if x <= warn_days:
+            return "🟠 关注"
+        return "🟢 正常"
+
+    show["库存预警"] = show["预计还能用天数"].apply(badge)
+
+    # 重命名/排序，尽量对齐你表上的列
+    col_order = [
+        "食材名称 (Item Name)",   # A
+        "当前库存",               # B
+        "平均最近两周使用量",     # C
+        "预计还能用天数",         # D
+        "计算下次采购量",         # E
+        "最近统计剩余日期",       # F
+        "最近采购日期",           # G
+        "平均采购间隔(天)",       # H
+        "最近采购数量",           # I
+        "最近采购单价",           # J
+        "累计支出",               # K
+        "库存预警",               # L  (新增)
+    ]
+    show = show.reindex(columns=[c for c in col_order if c in show.columns])
+
+    # KPI
     c1, c2, c3, c4 = st.columns(4)
-    total_items = (stats["食材名称 (Item Name)"].nunique()) if not stats.empty else 0
+    total_items = int(show["食材名称 (Item Name)"].nunique()) if not show.empty else 0
     total_spend = df.loc[df["状态 (Status)"]=="买入", "总价 (Total Cost)"].sum(min_count=1)
-    low_days = stats["预计还能用天数"].apply(lambda x: pd.to_numeric(x, errors="coerce")).fillna(9999)
-    need_buy = int((low_days <= 7).sum()) if not stats.empty else 0
+    low_days = pd.to_numeric(show["预计还能用天数"], errors="coerce")
+    need_buy = int((low_days <= warn_days).sum()) if not show.empty else 0
 
     c1.metric("已记录食材数", value=total_items)
     c2.metric("累计支出", value=f"{total_spend:.2f}")
-    c3.metric("≤7天即将耗尽", value=need_buy)
-    c4.metric("最近 14 天有使用记录数", value=int((stats["平均最近两周使用量"]>0).sum()) if not stats.empty else 0)
+    c3.metric(f"≤{warn_days}天即将耗尽", value=need_buy)
+    c4.metric("最近14天有使用记录数", value=int((pd.to_numeric(show["平均最近两周使用量"], errors="coerce")>0).sum()) if not show.empty else 0)
 
-    st.dataframe(stats, use_container_width=True)
+    st.dataframe(show, use_container_width=True)
 
-    # Charts
-    if not stats.empty:
+    # 图表（保留）
+    if not show.empty:
         st.markdown("#### Top 使用量（最近14天）")
-        top_use = stats.sort_values("平均最近两周使用量", ascending=False).head(15)
+        top_use = show.assign(**{
+            "平均最近两周使用量": pd.to_numeric(show["平均最近两周使用量"], errors="coerce").fillna(0)
+        }).sort_values("平均最近两周使用量", ascending=False).head(15)
         chart1 = alt.Chart(top_use).mark_bar().encode(
             x=alt.X("平均最近两周使用量:Q"),
             y=alt.Y("食材名称 (Item Name):N", sort="-x")
@@ -175,9 +227,9 @@ with tabs[1]:
         st.altair_chart(chart1, use_container_width=True)
 
         st.markdown("#### 预计还能用天数（越短越靠前）")
-        tmp = stats.copy()
-        tmp["预计还能用天数_num"] = pd.to_numeric(tmp["预计还能用天数"], errors="coerce")
-        tmp = tmp.dropna(subset=["预计还能用天数_num"]).sort_values("预计还能用天数_num").head(15)
+        tmp = show.assign(**{
+            "预计还能用天数_num": pd.to_numeric(show["预计还能用天数"], errors="coerce")
+        }).dropna(subset=["预计还能用天数_num"]).sort_values("预计还能用天数_num").head(15)
         if not tmp.empty:
             chart2 = alt.Chart(tmp).mark_bar().encode(
                 x=alt.X("预计还能用天数_num:Q", title="预计还能用天数"),
@@ -185,4 +237,4 @@ with tabs[1]:
             )
             st.altair_chart(chart2, use_container_width=True)
 
-    st.caption("说明：‘平均最近两周使用量’= 统计窗口内各区间（买入→剩余、剩余→剩余且减少）的使用量按天均分并加总，自动忽略无买入情况下剩余增加的异常记录。")
+    st.caption("说明：本页大部分列已实现。若与你的 Excel 口径不同，告诉我每列的精确计算方式，我立刻按你的规则更新。")
