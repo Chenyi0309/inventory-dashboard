@@ -8,6 +8,13 @@ import altair as alt
 # Choose backend (Google Sheets recommended)
 from gsheet import read_records, append_record, STATUS_VALUES
 
+import json, os
+# 如果放在 Secrets，就写一个临时文件给 gsheet.py 用
+if "service_account" in st.secrets:
+    with open("service_account.json", "w") as f:
+        json.dump(dict(st.secrets["service_account"]), f)
+
+
 st.set_page_config(page_title="库存管理 Dashboard", layout="wide")
 
 st.title("🍱 库存管理 Dashboard")
