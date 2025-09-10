@@ -126,7 +126,9 @@ with tabs[0]:
             try:
                 append_record(record)
                 ok += 1
-            except Exception:
+            except Exception as e:
+                st.error(f"保存失败：{e}")
+                pass
     # ===================== 统计 =====================
 with tabs[1]:
     st.subheader("库存统计（自动根据最近 14 天使用量估算）")
