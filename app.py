@@ -48,12 +48,20 @@ ALIASES = {
 
 def _fix_col_token(s: str) -> str:
     s = (s or "")
+    # 常见不可见字符 & 全角括号/空格
     s = s.replace("\u3000", " ")         # 全角空格
     s = s.replace("（", "(").replace("）", ")")
     s = s.replace("\u00A0", " ")         # 不换行空格
     s = s.replace("\u200B", "")          # 零宽空白
+    # 把括号里的空格收紧："(  Date  )" → "(Date)"
+    s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
+    # 去掉 CJK 与括号之间多余空格："日期  (Date)" → "日期 (Date)"
+    s = re.sub(r"([\u4e00-\u9fffA-Za-z0-9])\s+\(", r"\1 (", s)
+    s = re.sub(r"\)\s+([\u4e00-\u9fffA-Za-z0-9])", r") \1", s)
+    # 压缩其余连续空白
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
