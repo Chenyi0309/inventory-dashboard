@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 import pandas as pd
 from typing import Optional, Tuple, Dict, List
 
-# ========= 列名适配：自动识别多种中/英文/有无括号的表头 =========
+# ========= 列名适配 =========
 ALIASES: Dict[str, List[str]] = {
     "日期 (Date)": ["日期 (Date)", "日期", "Date", "date"],
-    "食材名称 (Item Name)": [
-        "食材名称 (Item Name)", "食材名称", "Item Name", "item name", "物品名", "名称"
-    ],
+    "食材名称 (Item Name)": ["食材名称 (Item Name)", "食材名称", "Item Name", "item name", "物品名", "名称"],
     "分类 (Category)": ["分类 (Category)", "分类", "Category", "category", "类型"],
-    "数量 (Qty)": ["数量 (Qty)", "数量", "Qty", "qty", "数量(个)"],
+    "数量 (Qty)": ["数量 (Qty)", "数量", "Qty", "qty"],
     "单位 (Unit)": ["单位 (Unit)", "单位", "Unit", "unit"],
     "单价 (Unit Price)": ["单价 (Unit Price)", "单价", "Unit Price", "price", "unit price"],
     "总价 (Total Cost)": ["总价 (Total Cost)", "总价", "Total Cost", "amount", "cost"],
@@ -19,23 +18,32 @@ ALIASES: Dict[str, List[str]] = {
     "备注 (Notes)": ["备注 (Notes)", "备注", "Notes", "notes"],
 }
 
+def _fix_col_token(s: str) -> str:
+    s = (s or "")
+    s = s.replace("\u3000", " ").replace("（","(").replace("）",")")
+    s = s.replace("\u00A0", " ").replace("\u200B","")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols = {c: str(c).strip() for c in df.columns}
-    df = df.rename(columns=cols)
-    found = {}
+    if df is None or df.empty:
+        return df
+    df = df.rename(columns={_fix_col_token(c): c for c in df.columns})
     lower_map = {c.lower(): c for c in df.columns}
+    mapping = {}
     for std, alts in ALIASES.items():
-        pick = None
         for a in alts:
-            # 既匹配原样，也匹配不区分大小写
-            if a in df.columns:
-                pick = a; break
-            if a.lower() in lower_map:
-                pick = lower_map[a.lower()]; break
-        if pick:
-            found[pick] = std
-    # 真正重命名
-    df = df.rename(columns=found)
+            af = _fix_col_token(a)
+            if af in df.columns:
+                mapping[af] = std; break
+            if af.lower() in lower_map:
+                mapping[lower_map[af.lower()]] = std; break
+    df = df.rename(columns=mapping)
+    if "日期 (Date)" in df.columns:
+        df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
+    for col in ["数量 (Qty)", "单价 (Unit Price)", "总价 (Total Cost)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 # ========= 小工具 =========
@@ -55,15 +63,11 @@ def _recent_two_remainders(g: pd.DataFrame) -> Tuple[Optional[pd.Series], Option
         return (None, d.iloc[-1]) if len(d) == 1 else (None, None)
     return d.iloc[-2], d.iloc[-1]
 
-# ========= 14 天用量估算（稳健版） =========
+# ========= 14 天用量估算（稳健） =========
 def _recent_usage_14d_new(item_df: pd.DataFrame) -> Optional[float]:
-    """
-    估算最近14天使用量：只用【买入/剩余】两类记录。
-    A) 有相邻两次“剩余”，中间无“买入”，且库存下降 → (差值/天数)*14
-    B) 否则 用 最近一次“买入”→最近一次“剩余” 的 (买入量-剩余量)/天数*14
-    """
-    if item_df.empty or "日期 (Date)" not in item_df or "状态 (Status)" not in item_df:
+    if item_df is None or item_df.empty:
         return None
+    item_df = _normalize_columns(item_df)
 
     prev_r, last_r = _recent_two_remainders(item_df)
     if prev_r is not None and last_r is not None:
@@ -86,13 +90,12 @@ def _recent_usage_14d_new(item_df: pd.DataFrame) -> Optional[float]:
             days = max(1, (last_rem["日期 (Date)"] - last_buy["日期 (Date)"]).days)
             used = max(0.0, float(q_buy) - float(q_rem))
             return (used / days) * 14.0 if days > 0 else None
-
     return None
 
-# 兼容旧名
 _recent_usage_14d_robust = _recent_usage_14d_new
 
 def _current_stock(g: pd.DataFrame) -> Optional[float]:
+    g = _normalize_columns(g)
     last_r = _last_of(g, "剩余")
     if last_r is None:
         return None
@@ -113,10 +116,6 @@ def _next_purchase_qty(curr_stock: Optional[float], use_14d: Optional[float]) ->
 
 # ========= 主函数：按“食材名称”汇总 =========
 def compute_stats(records: pd.DataFrame) -> pd.DataFrame:
-    """
-    输入：‘购入/剩余’明细 DataFrame（列名可中英文/不同写法）
-    输出：每个 item 的统计表
-    """
     if records is None or records.empty:
         return pd.DataFrame(columns=[
             "食材名称 (Item Name)", "当前库存", "平均最近两周使用量", "预计还能用天数", "计算下次采购量",
@@ -126,24 +125,14 @@ def compute_stats(records: pd.DataFrame) -> pd.DataFrame:
 
     df = _normalize_columns(records.copy())
 
-    # 基础字段兜底检测
-    must_have = ["食材名称 (Item Name)", "日期 (Date)", "状态 (Status)", "数量 (Qty)"]
-    missing = [c for c in must_have if c not in df.columns]
-    if missing:
-        # 返回空表 + 让前端显示“分类未识别”那条信息
+    # 必要字段检查
+    must = ["食材名称 (Item Name)", "日期 (Date)", "状态 (Status)", "数量 (Qty)"]
+    if any(c not in df.columns for c in must):
         return pd.DataFrame(columns=[
             "食材名称 (Item Name)", "当前库存", "平均最近两周使用量", "预计还能用天数", "计算下次采购量",
             "最近统计剩余日期", "最近采购日期", "最近采购数量", "最近采购单价",
             "平均采购间隔(天)", "累计支出"
         ])
-
-    # 类型清洗
-    df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
-    for col in ["数量 (Qty)", "单价 (Unit Price)", "总价 (Total Cost)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "分类 (Category)" in df.columns:
-        df["分类 (Category)"] = df["分类 (Category)"].astype(str).str.strip()
 
     out = []
     for item, g in df.groupby("食材名称 (Item Name)"):
@@ -183,7 +172,7 @@ def compute_stats(records: pd.DataFrame) -> pd.DataFrame:
         })
 
     res = pd.DataFrame(out)
-    if not res.empty:
+    if not res.empty and "预计还能用天数" in res.columns:
         res = res.sort_values(["预计还能用天数", "食材名称 (Item Name)"],
                               ascending=[True, True], na_position="last").reset_index(drop=True)
     return res
