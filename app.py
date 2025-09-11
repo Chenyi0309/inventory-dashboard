@@ -97,7 +97,7 @@ with tabs[0]:
             record = {
                 "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
-                "分类 (Category)": sel_type,
+                "分类 (Category)": sel_type,           # 录入即写到“分类 (Category)”
                 "数量 (Qty)": qty,
                 "单位 (Unit)": unit,
                 "单价 (Unit Price)": price if sel_status == "买入" else "",
@@ -139,22 +139,28 @@ with tabs[1]:
     # 计算整体统计
     stats_all = compute_stats(df)
 
-    # 每个物品的“最近分类”（用于筛选）
+    # 从原始数据直接拿“分类 (Category)”（每个物品按最近一次记录的分类）
     latest_cat = (
         df.sort_values("日期 (Date)")
           .groupby("食材名称 (Item Name)")["分类 (Category)"]
           .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else "")
     )
-    stats_all = stats_all.merge(latest_cat.rename("类型"),
-                                left_on="食材名称 (Item Name)", right_index=True, how="left")
+    stats_all = stats_all.merge(
+        latest_cat.rename("分类 (Category)"),
+        left_on="食材名称 (Item Name)", right_index=True, how="left"
+    )
 
-    # 选择类别 + 阈值
+    # 选择类别 + 阈值（类别从表里直接取）
     ctl1, ctl2, ctl3 = st.columns([1.2, 1, 1])
-    sel_type = ctl1.selectbox("选择类别", ["食物类", "清洁类", "消耗品", "饮品类"], index=0)
+    cat_options = ["全部"] + sorted(df["分类 (Category)"].dropna().unique().tolist())
+    sel_cat = ctl1.selectbox("选择类别", cat_options, index=0)
     warn_days   = ctl2.number_input("关注阈值（天）", min_value=1, max_value=60, value=7, step=1)
     urgent_days = ctl3.number_input("紧急阈值（天）", min_value=1, max_value=60, value=3, step=1)
 
-    stats = stats_all[stats_all["类型"].eq(sel_type)].copy()
+    # 按分类筛
+    stats = stats_all.copy()
+    if sel_cat != "全部":
+        stats = stats[stats["分类 (Category)"] == sel_cat]
 
     # 预警标签
     def badge(days):
@@ -171,7 +177,7 @@ with tabs[1]:
     total_spend = df.loc[df["状态 (Status)"] == "买入", "总价 (Total Cost)"].sum(min_count=1)
     low_days = pd.to_numeric(stats["预计还能用天数"], errors="coerce")
     need_buy = int((low_days <= warn_days).sum()) if not stats.empty else 0
-    c1.metric(f"{sel_type} — 记录食材数", value=total_items)
+    c1.metric(f"{sel_cat if sel_cat!='全部' else '全部'} — 记录食材数", value=total_items)
     c2.metric("累计支出", value=f"{(total_spend or 0):.2f}")
     c3.metric(f"≤{warn_days}天即将耗尽", value=need_buy)
     c4.metric("最近14天有使用记录数",
@@ -197,11 +203,13 @@ with tabs[1]:
     # 导出
     csv = show.to_csv(index=False).encode("utf-8-sig")
     st.download_button("⬇️ 导出统计结果（CSV）", data=csv,
-                       file_name=f"inventory_stats_{sel_type}.csv", mime="text/csv")
+                       file_name=f"inventory_stats_{'all' if sel_cat=='全部' else sel_cat}.csv",
+                       mime="text/csv")
 
 # ====== 下钻：物品详情 ======
 st.markdown("### 🔍 物品详情")
-detail_items = ["（不选）"] + list(show["食材名称 (Item Name)"].dropna().unique())
+# show/df 在上面已定义；这里直接使用
+detail_items = ["（不选）"] + (list(show["食材名称 (Item Name)"].dropna().unique()) if "show" in locals() and not show.empty else [])
 picked = st.selectbox("选择一个物品查看详情", detail_items, index=0)
 
 if picked and picked != "（不选）":
@@ -255,10 +263,8 @@ if picked and picked != "（不选）":
     anomaly = ""
     if len(recent_rem) >= 2:
         recent_rem["diff"] = recent_rem["数量 (Qty)"].diff()
-        if (recent_rem["diff"] > 0).any():  # 出现上涨
-            # 检查上涨区间内是否有买入
-            # 简化判断：有上涨就提示可能漏记
-            anomaly = "⚠️ 最近14天内出现‘剩余上涨’且未检测到对应‘买入’，可能漏记。"
+        if (recent_rem["diff"] > 0).any():
+            anomaly = "⚠️ 最近14天内出现‘剩余上涨’且可能未记录对应‘买入’，请检查是否漏记。"
 
     # KPI
     k1, k2, k3, k4, k5, k6 = st.columns(6)
