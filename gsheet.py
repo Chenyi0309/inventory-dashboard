@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Google Sheets backend helpers.
-Fill SHEET_URL and place your service_account.json in the project root.
+"""Google Sheets backend helpers (clean, no debug prints).
 The target worksheet MUST be named '购入/剩余' (you can change the name below if needed).
 """
 from __future__ import annotations
@@ -10,12 +9,11 @@ from typing import Dict
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import streamlit as st  # 用于缓存，降低 API 读频率（避免429）
+import streamlit as st  # 用于缓存
 
 # ======== CONFIG ========
-SHEET_URL = os.getenv("INVENTORY_SHEET_URL", "").strip()  # paste Sheet URL or set env var
+SHEET_URL = os.getenv("INVENTORY_SHEET_URL", "").strip()
 WORKSHEET_NAME = os.getenv("INVENTORY_WORKSHEET_NAME", "购入/剩余")
-INVENTORY_DEBUG = os.getenv("INVENTORY_DEBUG", "0").strip() in {"1", "true", "True"}
 
 HEADERS = [
     "日期 (Date)",
@@ -34,7 +32,6 @@ STATUS_VALUES = ["买入", "剩余"]
 # ================== 基础 ==================
 
 def _get_client():
-    # Requires service_account.json in working dir
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file("service_account.json", scopes=scopes)
     return gspread.authorize(creds)
@@ -55,9 +52,6 @@ def ensure_headers(ws=None):
     values = ws.get_values("1:1")
     if not values or not values[0]:
         ws.update("1:1", [HEADERS])
-    else:
-        # if header mismatch, do nothing (avoid overwriting user sheet);
-        pass
 
 # ================== 写入 ==================
 
@@ -78,7 +72,7 @@ def append_record(record: Dict):
     ]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
-# ================== 读 & 清洗 & 调试 ==================
+# ================== 读 & 清洗 ==================
 
 def _normalize_aliases(df: pd.DataFrame) -> pd.DataFrame:
     """列名别名对齐"""
@@ -106,8 +100,8 @@ def _normalize_aliases(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _normalize_values(df: pd.DataFrame) -> pd.DataFrame:
-    """字符串去空格/清 None，状态归一，数值列转数值，自动补总价"""
-    # 清字符串列
+    """字符串去空格/清 None，状态归一，数值列转数值，自动补总价，丢弃空名称"""
+    # 字符串列
     for c in ["食材名称 (Item Name)", "分类 (Category)", "单位 (Unit)", "状态 (Status)", "备注 (Notes)"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
@@ -148,51 +142,13 @@ def _normalize_values(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def _debug_write(title: str, obj):
-    """在 Streamlit/日志里输出调试信息"""
-    try:
-        st.write(title, obj)
-    except Exception:
-        print(f"[DEBUG] {title}")
-        try:
-            print(obj)
-        except Exception:
-            pass
-
 def read_records() -> pd.DataFrame:
     ws = _get_ws()
     ensure_headers(ws)
     records = ws.get_all_records()
-    raw_df = pd.DataFrame(records)
-
-    # 调试：原始前20行
-    _debug_write("✅ 原始数据（前20行）", raw_df.head(20))
-
-    # 别名 & 补列
-    df = _normalize_aliases(raw_df)
-
-    # 清洗归一
+    df = pd.DataFrame(records)
+    df = _normalize_aliases(df)
     df = _normalize_values(df)
-
-    # 调试：清洗后信息
-    _debug_write("✅ 清洗后形状", df.shape)
-    _debug_write("✅ 清洗后列名", list(df.columns))
-    _debug_write("✅ 清洗后样例（前10行）", df.head(10))
-    if "状态 (Status)" in df.columns:
-        _debug_write("✅ 状态分布", df["状态 (Status)"].value_counts(dropna=False))
-    if "分类 (Category)" in df.columns:
-        _debug_write("✅ 分类分布", df["分类 (Category)"].value_counts(dropna=False))
-
-    if INVENTORY_DEBUG:
-        # 额外详细信息（可选）
-        try:
-            buf = []
-            buf.append("DataFrame info:")
-            buf.append(str(df.dtypes))
-            _debug_write("🧪 额外诊断", "\n".join(buf))
-        except Exception:
-            pass
-
     return df
 
 # ================== 主数据（物品清单） ==================
