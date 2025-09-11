@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import json
+import re
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -32,7 +33,7 @@ except Exception:
 ALLOWED_CATS = ["食物类", "清洁类", "消耗品", "饮品类"]
 DEFAULT_CAT = "食物类"
 
-# ============== 列名归一化 + 安全排序工具 ==============
+# ============== 列名归一化 + 安全工具 ==============
 ALIASES = {
     "日期 (Date)": ["日期 (Date)","日期","Date","date"],
     "食材名称 (Item Name)": ["食材名称 (Item Name)","食材名称","Item Name","item name","物品名","名称"],
@@ -45,20 +46,33 @@ ALIASES = {
     "备注 (Notes)": ["备注 (Notes)","备注","Notes","notes"],
 }
 
+def _fix_col_token(s: str) -> str:
+    s = (s or "")
+    s = s.replace("\u3000", " ")         # 全角空格
+    s = s.replace("（", "(").replace("）", ")")
+    s = s.replace("\u00A0", " ")         # 不换行空格
+    s = s.replace("\u200B", "")          # 零宽空白
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    # 先把原始列做字符修复
+    fixed = {_fix_col_token(c): c for c in df.columns}
+    df = df.rename(columns=fixed)
+    # 再做别名匹配（大小写不敏感）
     lower_map = {c.lower(): c for c in df.columns}
     mapping = {}
     for std, alts in ALIASES.items():
         for a in alts:
-            if a in df.columns:
-                mapping[a] = std; break
-            if a.lower() in lower_map:
-                mapping[lower_map[a.lower()]] = std; break
+            a_fixed = _fix_col_token(a)
+            if a_fixed in df.columns:
+                mapping[a_fixed] = std; break
+            if a_fixed.lower() in lower_map:
+                mapping[lower_map[a_fixed.lower()]] = std; break
     df = df.rename(columns=mapping)
-    # 类型清洗（尽量早做）
+    # 基本类型
     if "日期 (Date)" in df.columns:
         df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
     for col in ["数量 (Qty)","单价 (Unit Price)","总价 (Total Cost)"]:
@@ -67,7 +81,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def safe_sort(df: pd.DataFrame, by: str, ascending=True):
-    """如果列不存在就直接返回，不排序，避免 KeyError。"""
     if df is None or df.empty or by not in df.columns:
         return df
     return df.sort_values(by, ascending=ascending)
@@ -210,6 +223,18 @@ with tabs[1]:
         st.error(f"读取表格失败：{e}")
         st.stop()
 
+    # 调试面板：看看实际读到了什么
+    with st.expander("🔎 调试：查看原始数据快照", expanded=False):
+        st.write("shape:", df.shape)
+        st.write("columns:", list(df.columns))
+        for col in ["日期 (Date)","食材名称 (Item Name)","分类 (Category)","状态 (Status)"]:
+            if col in df.columns:
+                st.write(f"{col} 非空数量:", int(df[col].notna().sum()))
+            else:
+                st.write(f"⚠️ 未识别列：{col}")
+        if not df.empty:
+            st.dataframe(df.head(10), use_container_width=True)
+
     # 兜底分类
     if "分类 (Category)" not in df.columns:
         df["分类 (Category)"] = DEFAULT_CAT
@@ -249,7 +274,10 @@ with tabs[1]:
         if x <= urgent_days: return "🚨 立即下单"
         if x <= warn_days:   return "🟠 关注"
         return "🟢 正常"
-    stats["库存预警"] = stats["预计还能用天数"].apply(badge)
+    if not stats.empty and "预计还能用天数" in stats.columns:
+        stats["库存预警"] = stats["预计还能用天数"].apply(badge)
+    else:
+        stats["库存预警"] = ""
 
     # KPI
     c1, c2, c3, c4 = st.columns(4)
@@ -282,7 +310,7 @@ with tabs[1]:
         show = show.drop(columns="__sev__", errors="ignore")
 
     if show.empty:
-        st.info("该类别下暂无统计结果（可能是分类列为空或未被识别）。请检查『购入/剩余』表中的【分类 (Category)】是否填写正确。")
+        st.info("该类别下暂无统计结果（可能是【分类 (Category)】为空或未被识别/未读到正确工作表）。请检查『购入/剩余』表中的表头和工作表名。")
     st.dataframe(show, use_container_width=True)
 
     # 导出
@@ -320,6 +348,7 @@ with tabs[1]:
         else:
             avg_interval = np.nan
 
+        # KPI
         k1, k2, k3, k4, k5, k6 = st.columns(6)
         k1.metric("当前库存", f"{0 if np.isnan(cur_stock) else cur_stock}")
         k2.metric("最近14天用量", f"{0 if not use14 else round(use14,2)}")
