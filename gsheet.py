@@ -81,8 +81,15 @@ def read_records() -> pd.DataFrame:
     records = ws.get_all_records()
     df = pd.DataFrame(records)
 
+    # 调试输出：看读到什么
+    try:
+        import streamlit as st
+        st.write("✅ 从 Google Sheet 读取到的原始数据：", df.head(20))
+    except:
+        print("✅ 从 Google Sheet 读取到的原始数据：")
+        print(df.head(20))
+
     # Normalize columns that might be slightly different in user's sheet
-    # Try to alias common header variants
     aliases = {
         "日期": "日期 (Date)",
         "食材名称": "食材名称 (Item Name)",
@@ -125,7 +132,7 @@ def read_records() -> pd.DataFrame:
     for c in ["食材名称 (Item Name)", "分类 (Category)", "单位 (Unit)", "状态 (Status)", "备注 (Notes)"]:
         df[c] = df[c].astype(str).str.strip()
 
-    # Auto compute Total Cost if missing and it's a buy row
+    # Auto compute Total Cost if missing
     mask_buy = df["状态 (Status)"].eq("买入")
     need_total = mask_buy & df["总价 (Total Cost)"].isna()
     df.loc[need_total, "总价 (Total Cost)"] = df.loc[need_total, "数量 (Qty)"] * df.loc[need_total, "单价 (Unit Price)"]
