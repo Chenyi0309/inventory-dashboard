@@ -1,208 +1,195 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import pandas as pd
-import numpy as np
+from typing import Tuple, Optional
 
-# --------- 小工具 ---------
+# =============== 基础小工具 ===============
 
-def _latest_remainder_row(item_df: pd.DataFrame):
-    rem = item_df[item_df["状态 (Status)"] == "剩余"].copy()
+def _latest_remainder_row(item_df: pd.DataFrame) -> Optional[pd.Series]:
+    """最近一条‘剩余’记录。"""
+    rem = item_df[item_df["状态 (Status)"] == "剩余"].sort_values("日期 (Date)")
     if rem.empty:
         return None
-    rem = rem.sort_values("日期 (Date)")
     return rem.iloc[-1]
 
-def _last_buy_row(item_df: pd.DataFrame):
-    buy = item_df[item_df["状态 (Status)"] == "买入"].copy()
+def _last_buy_row(item_df: pd.DataFrame) -> Optional[pd.Series]:
+    """最近一条‘买入’记录。"""
+    buy = item_df[item_df["状态 (Status)"] == "买入"].sort_values("日期 (Date)")
     if buy.empty:
         return None
-    buy = buy.sort_values("日期 (Date)")
     return buy.iloc[-1]
 
-def _avg_buy_interval_days(item_df: pd.DataFrame):
-    buy = item_df[item_df["状态 (Status)"] == "买入"].copy()
-    if len(buy) < 2:
-        return np.nan
-    buy = buy.sort_values("日期 (Date)")
-    deltas = buy["日期 (Date)"].diff().dt.days.dropna()
-    if deltas.empty:
-        return np.nan
-    return deltas.mean()
+def _avg_buy_interval_days(item_df: pd.DataFrame) -> float:
+    """平均采购间隔（天）。按不同的买入日期算相邻差分的平均。"""
+    buy_dates = (
+        item_df[item_df["状态 (Status)"] == "买入"]["日期 (Date)"]
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    if len(buy_dates) < 2:
+        return 0.0
+    diffs = [(buy_dates[i] - buy_dates[i - 1]).days for i in range(1, len(buy_dates))]
+    return float(pd.Series(diffs).mean())
 
-# --------- 关键口径：按你新规则计算“最近两周使用量” ---------
+# =============== 两周用量（新版算法） ===============
 
-def _recent_usage_14d_new(item_df: pd.DataFrame) -> float:
+def _recent_usage_14d_robust(item_df: pd.DataFrame) -> Tuple[float, float, Optional[pd.Timestamp], Optional[pd.Timestamp]]:
     """
-    以【最近一条“剩余”记录的日期】为窗口右端点，向前14天。
-    段的构造与计量规则：
-      - pair(买入 -> 剩余) 且中间无买入：用量 = 买入量 - 剩余量
-      - pair(剩余 -> 剩余)：若后 >= 前 视为漏记买入 → 丢弃并从后一个重置；若后 < 前：用量 = 前 - 后
-      - 每个 pair 的用量按区间天数均分，并乘以与14天窗口的相交天数
-    起点选择（用于构造第一段）：
-      1) 若窗口起点当天或更早有“剩余”，取“<= 起点”的最近一条；
-      2) 否则取窗口内第一条“剩余”；
-      3) 若窗口内没有，取窗口外最近的一条“剩余”。
+    返回：(两周用量, 当前库存, 最近统计剩余日期E, 基线日期S)
+    规则：
+      - E = 最近一条‘剩余’的日期；
+      - S = E-14天附近的基线‘剩余’（优先窗口内最早；否则窗口外最近的前一条）；
+      - 若 [S, E] 内出现‘剩余’上涨且其间没有‘买入’，视为漏记进货，基线重置到“上涨后的那条剩余”；
+      - 消耗 = 基线剩余 + 区间内买入总量 - 终点剩余；
+      - 按天数折算 14 天（D<=0 时不折算）。
     """
+    if item_df.empty:
+        return 0.0, 0.0, None, None
+
     df = item_df.sort_values("日期 (Date)").copy()
-    df = df.dropna(subset=["日期 (Date)"])
+    rem = df[df["状态 (Status)"] == "剩余"][["日期 (Date)", "数量 (Qty)"]].dropna()
+    buy = df[df["状态 (Status)"] == "买入"][["日期 (Date)", "数量 (Qty)"]].dropna()
 
-    # 只在有“剩余”记录时才有意义
-    latest_rem = _latest_remainder_row(df)
-    if latest_rem is None:
-        return 0.0
+    if rem.empty:
+        return 0.0, 0.0, None, None
 
-    window_end = pd.Timestamp(latest_rem["日期 (Date)"])
-    window_start = window_end - pd.Timedelta(days=14)
+    # 终点 E
+    end_row = rem.iloc[-1]
+    end_date = pd.to_datetime(end_row["日期 (Date)"])
+    end_stock = float(end_row["数量 (Qty)"])
 
-    # 只保留“买入/剩余”两个状态的必要列
-    core = df.loc[df["状态 (Status)"].isin(["买入", "剩余"]),
-                  ["日期 (Date)", "状态 (Status)", "数量 (Qty)"]].copy()
-    core["数量 (Qty)"] = pd.to_numeric(core["数量 (Qty)"], errors="coerce")
-    core = core.dropna(subset=["数量 (Qty)"])
-    core = core.sort_values("日期 (Date)").reset_index(drop=True)
-    if core.empty:
-        return 0.0
+    # 目标起点 E - 14 天
+    target_start = end_date - pd.Timedelta(days=14)
 
-    # ---- 寻找起始锚点（一个“剩余”点）----
-    rem_only = core[core["状态 (Status)"]=="剩余"].copy()
-    if rem_only.empty:
-        return 0.0
-
-    # 1) 窗口起点当天或更早的最近一条
-    r0 = rem_only[rem_only["日期 (Date)"] <= window_start]
-    if not r0.empty:
-        anchor = r0.iloc[-1]
+    # 选择 S：窗口内最早；否则取窗口外最近的前一条
+    rem_in_win = rem[(rem["日期 (Date)"] >= target_start) & (rem["日期 (Date)"] <= end_date)]
+    if not rem_in_win.empty:
+        base_row = rem_in_win.iloc[0]
     else:
-        # 2) 窗口内最早一条
-        r1 = rem_only[(rem_only["日期 (Date)"] > window_start) & (rem_only["日期 (Date)"] <= window_end)]
-        if not r1.empty:
-            anchor = r1.iloc[0]
+        rem_before = rem[rem["日期 (Date)"] < target_start]
+        if not rem_before.empty:
+            base_row = rem_before.iloc[-1]
         else:
-            # 3) 窗口外最近一条（离起点最近的）
-            before = rem_only[rem_only["日期 (Date)"] < window_start]
-            after  = rem_only[rem_only["日期 (Date)"] > window_end]
-            if before.empty and after.empty:
-                anchor = rem_only.iloc[-1]
-            elif before.empty:
-                anchor = after.iloc[0]
-            elif after.empty:
-                anchor = before.iloc[-1]
-            else:
-                # 选离窗口最近的一个
-                if (window_start - before.iloc[-1]["日期 (Date)"]) <= (after.iloc[0]["日期 (Date)"] - window_end):
-                    anchor = before.iloc[-1]
-                else:
-                    anchor = after.iloc[0]
+            # 没有更早记录，就只能从第一条剩余算起（防止空）
+            base_row = rem.iloc[0]
 
-    # 构造“事件序列”：把 anchor 放进队列（确保从它开始）
-    # 拿窗口起点之后、窗口终点之前的所有事件；再把 anchor 之前的事件最后一个放进来，避免断层
-    events = core[(core["日期 (Date)"] >= anchor["日期 (Date)"]) &
-                  (core["日期 (Date)"] <= window_end)].copy()
+    base_date = pd.to_datetime(base_row["日期 (Date)"])
+    base_stock = float(base_row["数量 (Qty)"])
 
-    # 若 anchor 不是 events 的第一行，则把 anchor 插到最前
-    if events.empty or events.iloc[0]["日期 (Date)"] > anchor["日期 (Date)"]:
-        events = pd.concat([pd.DataFrame([anchor]), events], ignore_index=True)
+    # 检测 [S, E] 中是否有“剩余上涨但无买入”的情况，若有，重置基线到上涨后的那条
+    rem_window = rem[(rem["日期 (Date)"] >= base_date) & (rem["日期 (Date)"] <= end_date)].reset_index(drop=True)
+    if len(rem_window) >= 2:
+        for i in range(1, len(rem_window)):
+            pre = rem_window.loc[i - 1]
+            cur = rem_window.loc[i]
+            if float(cur["数量 (Qty)"]) > float(pre["数量 (Qty)"]):
+                # 检查两条剩余之间是否有买入
+                seg_buy = buy[(buy["日期 (Date)"] > pre["日期 (Date)"]) & (buy["日期 (Date)"] <= cur["日期 (Date)"])]
+                if seg_buy.empty:
+                    # 无买入但库存上涨 => 漏记买入；基线重置为上涨后的这一条
+                    base_date = pd.to_datetime(cur["日期 (Date)"])
+                    base_stock = float(cur["数量 (Qty)"])
 
-    # --- 遍历相邻事件，构造 pair 并计入窗口 ---
-    total_usage = 0.0
-    i = 0
-    while i < len(events) - 1:
-        cur = events.iloc[i]
-        nxt = events.iloc[i+1]
+    # 计算区间内消耗：开库存 + 买入 - 期末库存
+    buy_sum = 0.0
+    if not buy.empty:
+        buy_sum = float(
+            buy[(buy["日期 (Date)"] > base_date) & (buy["日期 (Date)"] <= end_date)]["数量 (Qty)"].sum()
+        )
 
-        cur_dt = pd.Timestamp(cur["日期 (Date)"])
-        nxt_dt = pd.Timestamp(nxt["日期 (Date)"])
-        if nxt_dt <= cur_dt:
-            i += 1
-            continue
+    consumption = (base_stock if pd.notna(base_stock) else 0.0) + buy_sum - (end_stock if pd.notna(end_stock) else 0.0)
+    if consumption < 0:
+        consumption = 0.0  # 数据噪声保护
 
-        seg_days = (nxt_dt - cur_dt).days
-        if seg_days <= 0:
-            i += 1
-            continue
+    days = max((end_date - base_date).days, 0)
+    if days > 0:
+        use14 = consumption * 14.0 / days
+    else:
+        use14 = consumption  # 同日，无法折算，只能用当日值（一般为0）
 
-        # 计算该 pair 的“基础用量”（未考虑窗口权重）
-        used = None
-        if cur["状态 (Status)"] == "买入" and nxt["状态 (Status)"] == "剩余":
-            # 中间无买入的保证：我们是逐对遍历，若中间又遇到买入，必然形成“买入→买入/剩余”的下一对
-            used = max(float(cur["数量 (Qty)"]) - float(nxt["数量 (Qty)"]), 0.0)
-        elif cur["状态 (Status)"] == "剩余" and nxt["状态 (Status)"] == "剩余":
-            cur_q = float(cur["数量 (Qty)"]); nxt_q = float(nxt["数量 (Qty)"])
-            if nxt_q >= cur_q:
-                # 视为中间漏记买入：丢弃这段 & 从下一条重置
-                i += 1
-                continue
-            else:
-                used = cur_q - nxt_q
-        else:
-            # 买入 -> 买入 或 其他组合：这段不计用量（相当于重置/补货）
-            i += 1
-            continue
+    return float(use14), float(end_stock), end_date, base_date
 
-        # 计算与 14 天窗口的重叠天数（窗口是 [window_start, window_end] ）
-        overlap_start = max(cur_dt, window_start)
-        overlap_end = min(nxt_dt, window_end)
-        overlap = (overlap_end - overlap_start).days
-        if overlap > 0 and used is not None and seg_days > 0:
-            per_day = used / seg_days
-            total_usage += per_day * overlap
+# =============== 汇总统计 ===============
 
-        i += 1
-
-    return round(float(total_usage), 4)
-
-# --------- 汇总计算 ---------
-
-def compute_stats(df: pd.DataFrame, today: pd.Timestamp | None = None) -> pd.DataFrame:
+def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    输入：整表 DataFrame（已清洗）
+    输出：每个物品的统计行，包含：
+      - 食材名称 (Item Name)
+      - 当前库存
+      - 平均最近两周使用量
+      - 预计还能用天数
+      - 计算下次采购量（= 两周目标用量 - 当前库存，目标用量取“最近两周用量”）
+      - 最近统计剩余日期
+      - 最近采购日期
+      - 平均采购间隔(天)
+      - 最近采购数量 / 最近采购单价
+      - 累计支出
+    """
     if df.empty:
-        return pd.DataFrame(columns=[
-            "食材名称 (Item Name)","当前库存","平均最近两周使用量","预计还能用天数",
-            "计算下次采购量","最近统计剩余日期","最近采购日期","平均采购间隔(天)",
-            "最近采购数量","最近采购单价","累计支出"
-        ])
+        cols = [
+            "食材名称 (Item Name)", "当前库存", "平均最近两周使用量", "预计还能用天数",
+            "计算下次采购量", "最近统计剩余日期", "最近采购日期",
+            "平均采购间隔(天)", "最近采购数量", "最近采购单价", "累计支出"
+        ]
+        return pd.DataFrame(columns=cols)
 
     out_rows = []
+
     for item, item_df in df.groupby("食材名称 (Item Name)"):
-        item_df = item_df.copy()
-        latest_rem = _latest_remainder_row(item_df)
-        last_buy   = _last_buy_row(item_df)
+        item_df = item_df.copy().sort_values("日期 (Date)")
 
-        current_stock = float(latest_rem["数量 (Qty)"]) if latest_rem is not None else np.nan
-        last_rem_date = latest_rem["日期 (Date)"] if latest_rem is not None else pd.NaT
+        # 两周用量（新版）
+        use14, cur_stock, end_date, base_date = _recent_usage_14d_robust(item_df)
 
-        last_buy_date = last_buy["日期 (Date)"] if last_buy is not None else pd.NaT
-        last_buy_qty  = float(last_buy["数量 (Qty)"]) if last_buy is not None else np.nan
-        last_buy_price = float(last_buy["单价 (Unit Price)"]) if last_buy is not None else np.nan
+        # 预计还能用天数
+        if use14 and use14 > 0:
+            days_left = cur_stock / (use14 / 14.0)
+        else:
+            days_left = float("nan")
 
-        # —— 使用你新规则计算最近两周使用量 ——
-        use_14 = _recent_usage_14d_new(item_df)
+        # 下次采购量（两周目标量 - 当前库存；目标量取 use14）
+        target14 = use14 if use14 is not None else 0.0
+        next_buy_qty = max(0.0, target14 - cur_stock)
 
-        # 预计还能用天数 = 当前库存 ÷ (两周用量/14)
-        daily = (use_14 / 14.0) if use_14 and use_14 > 0 else np.nan
-        days_left = (current_stock / daily) if (daily and daily > 0 and not np.isnan(current_stock)) else np.nan
+        # 最近采购
+        last_buy = _last_buy_row(item_df)
+        last_buy_date = last_buy["日期 (Date)"].date().isoformat() if last_buy is not None and pd.notna(last_buy["日期 (Date)"]) else None
+        last_buy_qty = float(last_buy["数量 (Qty)"]) if last_buy is not None and pd.notna(last_buy["数量 (Qty)"]) else None
+        last_buy_price = float(last_buy["单价 (Unit Price)"]) if last_buy is not None and pd.notna(last_buy["单价 (Unit Price)"]) else None
 
-        # 计算下次采购量 = 两周目标用量 − 当前库存（<0 记 0）
-        target_14 = use_14
-        next_buy_qty = max(target_14 - (current_stock if not np.isnan(current_stock) else 0), 0) if target_14 > 0 else 0
+        # 平均采购间隔
+        avg_buy_interval = _avg_buy_interval_days(item_df)
 
-        avg_interval = _avg_buy_interval_days(item_df)
+        # 累计支出
         total_spend = item_df.loc[item_df["状态 (Status)"] == "买入", "总价 (Total Cost)"].sum(min_count=1)
+        total_spend = float(total_spend) if pd.notna(total_spend) else 0.0
 
         out_rows.append({
             "食材名称 (Item Name)": item,
-            "当前库存": round(current_stock, 4) if not np.isnan(current_stock) else "",
-            "平均最近两周使用量": round(use_14, 4) if use_14 else 0,
-            "预计还能用天数": round(days_left, 2) if days_left and not np.isnan(days_left) else "",
-            "计算下次采购量": round(next_buy_qty, 2),
-            "最近统计剩余日期": last_rem_date,
+            "当前库存": float(cur_stock) if pd.notna(cur_stock) else None,
+            "平均最近两周使用量": float(use14) if pd.notna(use14) else 0.0,
+            "预计还能用天数": float(days_left) if pd.notna(days_left) else None,
+            "计算下次采购量": float(next_buy_qty),
+            "最近统计剩余日期": end_date.date().isoformat() if end_date is not None else None,
             "最近采购日期": last_buy_date,
-            "平均采购间隔(天)": round(avg_interval, 2) if avg_interval == avg_interval else "",
-            "最近采购数量": round(last_buy_qty, 4) if last_buy_qty == last_buy_qty else "",
-            "最近采购单价": round(last_buy_price, 4) if last_buy_price == last_buy_price else "",
-            "累计支出": round(total_spend, 2) if total_spend == total_spend else ""
+            "平均采购间隔(天)": float(avg_buy_interval) if pd.notna(avg_buy_interval) else 0.0,
+            "最近采购数量": last_buy_qty,
+            "最近采购单价": last_buy_price,
+            "累计支出": total_spend,
         })
 
-    res = pd.DataFrame(out_rows)
-    if not res.empty and "预计还能用天数" in res.columns:
-        res = res.sort_values(by="预计还能用天数", na_position="last")
-    return res.reset_index(drop=True)
+    result = pd.DataFrame(out_rows)
+
+    # 排序：可按预计还能用天数升序，把紧急项放前
+    if not result.empty and "预计还能用天数" in result.columns:
+        result = result.sort_values(
+            by=["预计还能用天数", "食材名称 (Item Name)"],
+            ascending=[True, True],
+            na_position="last"
+        ).reset_index(drop=True)
+
+    return result
