@@ -6,6 +6,37 @@ import numpy as np
 import streamlit as st
 import altair as alt
 
+# —— 列名别名（中/英/带不带括号）+ 归一化工具 —— #
+ALIASES = {
+    "日期 (Date)": ["日期 (Date)", "日期", "Date", "date"],
+    "食材名称 (Item Name)": ["食材名称 (Item Name)", "食材名称", "Item Name", "item name", "物品名", "名称"],
+    "分类 (Category)": ["分类 (Category)", "分类", "Category", "category", "类型"],
+    "数量 (Qty)": ["数量 (Qty)", "数量", "Qty", "qty"],
+    "单位 (Unit)": ["单位 (Unit)", "单位", "Unit", "unit"],
+    "单价 (Unit Price)": ["单价 (Unit Price)", "单价", "Unit Price", "price", "unit price"],
+    "总价 (Total Cost)": ["总价 (Total Cost)", "总价", "Total Cost", "amount", "cost"],
+    "状态 (Status)": ["状态 (Status)", "状态", "Status", "status"],
+    "备注 (Notes)": ["备注 (Notes)", "备注", "Notes", "notes"],
+}
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """把多种写法的表头统一成标准中文列名（与 compute.py 一致）"""
+    if df is None or df.empty:
+        return df
+    # 去掉表头空白
+    df = df.rename(columns={c: str(c).strip() for c in df.columns})
+    lower_map = {c.lower(): c for c in df.columns}
+    mapping = {}
+    for std, alts in ALIASES.items():
+        for a in alts:
+            if a in df.columns:
+                mapping[a] = std
+                break
+            if a.lower() in lower_map:
+                mapping[lower_map[a.lower()]] = std
+                break
+    return df.rename(columns=mapping)
+
 # ================= Secrets/ENV =================
 if "service_account" in st.secrets:
     with open("service_account.json", "w") as f:
@@ -61,6 +92,7 @@ with tabs[0]:
     # 先尝试读取“购入/剩余”，用于在没有主数据时推断‘已有物品+单位’
     try:
         df_all = read_records_fn()
+        df_all = normalize_columns(df_all) 
     except Exception as e:
         df_all = pd.DataFrame()
         st.info("暂时读取不到『购入/剩余』，仅可手动新增行。")
@@ -177,6 +209,7 @@ with tabs[1]:
     # 读明细
     try:
         df = read_records_fn()
+        df = normalize_columns(df) 
     except Exception as e:
         st.error(f"读取表格失败：{e}")
         st.stop()
