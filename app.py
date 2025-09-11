@@ -259,15 +259,11 @@ with tabs[1]:
         st.markdown("#### 最近记录（原始）")
         cols = ["日期 (Date)","状态 (Status)","数量 (Qty)","单价 (Unit Price)","总价 (Total Cost)","分类 (Category)","备注 (Notes)"]
         st.dataframe(item_df[cols].sort_values("日期 (Date)", ascending=False).head(10), use_container_width=True)
-            fail += 1
 
+        # 录入成功/失败提示
         if ok and not fail:
             st.success(f"已成功写入 {ok} 条记录！")
         elif ok and fail:
-            st.warning(f"部分成功：{ok} 条成功，{fail} 条失败。")
+            st.warning(f"部分成功: {ok} 条成功, {fail} 条失败。")
         else:
             st.error("保存失败，请检查表格权限与 Secrets 配置。")
-
-    st.caption("提示：单价只在‘买入’状态下需要填写；‘剩余’只统计数量。")
-
-
