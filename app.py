@@ -16,7 +16,10 @@ if sheet_url:
     os.environ["INVENTORY_SHEET_URL"] = sheet_url
 
 # ================ Backend ======================
+# append_record: 写回 “购入/剩余”
 from gsheet import append_record
+
+# 读“购入/剩余”和（若有）主数据
 try:
     from gsheet import read_records_cached as read_records_fn, read_catalog_cached as read_catalog_fn, bust_cache
 except Exception:
@@ -24,6 +27,8 @@ except Exception:
     def bust_cache(): pass
 
 # compute：含“最近14天用量”的稳健算法
+# 你自己的 compute.py 里如果有 compute_stats 与 _recent_usage_14d_robust，这里优先用；
+# 否则 fallback 到 _recent_usage_14d_new。
 try:
     from compute import compute_stats, _recent_usage_14d_robust as _recent_usage_14d_new
 except Exception:
@@ -40,45 +45,75 @@ st.caption("录入‘买入/剩余’，自动保存到表格，并实时生成�
 
 tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
 
+# 一个小工具：分类标准化（空值/异常 → DEFAULT_CAT）
+def _normalize_cat(x: str) -> str:
+    if x is None:
+        return DEFAULT_CAT
+    s = str(x).strip()
+    if s == "" or s.lower() in ("nan", "none"):
+        return DEFAULT_CAT
+    return s if s in ALLOWED_CATS else DEFAULT_CAT
+
 # ================== 录入记录 ==================
 with tabs[0]:
     st.subheader("录入新记录")
 
-    # 主数据（仅用于下拉展示“物品名/单位”；如果你没有主数据表，这段只影响录入页）
+    # 先尝试读取“购入/剩余”，用于在没有主数据时推断‘已有物品+单位’
+    try:
+        df_all = read_records_fn()
+    except Exception as e:
+        df_all = pd.DataFrame()
+        st.info("暂时读取不到『购入/剩余』，仅可手动新增行。")
+
+    # 主数据（仅用于下拉展示“物品名/单位”；没有也不影响录入）
     try:
         catalog = read_catalog_fn()
-    except Exception as e:
-        st.error(f"读取物品清单失败：{e}")
-        st.stop()
-
-    if catalog.empty or not {"物品名", "类型"}.issubset(set(catalog.columns)):
-        st.warning("未找到物品清单工作表，或缺少‘物品名/类型’列。")
-        st.stop()
+    except Exception:
+        catalog = pd.DataFrame()
 
     c1, c2, c3 = st.columns(3)
     sel_date   = c1.date_input("日期 (Date)", pd.Timestamp.today())
-    sel_type   = c2.selectbox("类型", ALLOWED_CATS)     # 录入页里类型照旧让你选择
+    sel_type   = c2.selectbox("类型（大类）", ALLOWED_CATS, index=0)
     sel_status = c3.selectbox("状态 (Status)", ["买入", "剩余"])
 
-    items_df = catalog[catalog["类型"] == sel_type].copy().reset_index(drop=True)
-    if items_df.empty:
-        st.info("该类型下暂无物品。")
-        st.stop()
+    # ======== 构造可编辑表 ========
+    # 优先用主数据（要求至少含 物品名/单位/类型）；否则用历史记录推断
+    if not catalog.empty and {"物品名","单位","类型"}.issubset(catalog.columns):
+        base = catalog[catalog["类型"] == sel_type][["物品名","单位"]].drop_duplicates().reset_index(drop=True)
+    else:
+        # 从历史记录里，取该大类下各物品“最近一条记录”的单位
+        if not df_all.empty:
+            df_all = df_all.copy()
+            if "分类 (Category)" not in df_all.columns:
+                df_all["分类 (Category)"] = DEFAULT_CAT
+            df_all["分类 (Category)"] = df_all["分类 (Category)"].apply(_normalize_cat)
 
-    st.markdown("**在下表中填写数量（必填），单价仅在买入时填写**")
-    edit_df = items_df[["物品名", "单位"]].copy()
+            latest_unit = (df_all[df_all["分类 (Category)"] == sel_type]
+                           .sort_values("日期 (Date)")
+                           .groupby("食材名称 (Item Name)")["单位 (Unit)"]
+                           .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else "")
+                           .reset_index()
+                           .rename(columns={"食材名称 (Item Name)":"物品名","单位 (Unit)":"单位"}))
+            base = latest_unit
+        else:
+            base = pd.DataFrame(columns=["物品名","单位"])
+
+    # 构造可编辑 DataFrame，并允许“手动新增行”
+    edit_df = base.copy()
+    if "物品名" not in edit_df.columns: edit_df["物品名"] = ""
+    if "单位" not in edit_df.columns:   edit_df["单位"] = ""
     edit_df["数量"] = 0.0
     if sel_status == "买入":
         edit_df["单价"] = 0.0
     edit_df["备注"] = ""
 
+    st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
     edited = st.data_editor(
         edit_df,
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            "物品名": st.column_config.Column(disabled=True),
-            "单位": st.column_config.Column(disabled=True),
+            # 当来自主数据/历史记录时，物品名/单位可编辑（允许新增/修正）
             "数量": st.column_config.NumberColumn(step=0.1, min_value=0.0),
             "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status == "买入" else None,
         },
@@ -87,23 +122,27 @@ with tabs[0]:
 
     if st.button("✅ 批量保存到『购入/剩余』"):
         rows = edited.copy()
-        rows = rows[pd.to_numeric(rows["数量"], errors="coerce").fillna(0) > 0]
+        # 仅保留数量>0 且 物品名非空 的行
+        rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
+        rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
         if rows.empty:
-            st.warning("请至少填写一个物品的数量")
+            st.warning("请至少填写一个物品的‘物品名’和‘数量’")
             st.stop()
 
         ok, fail = 0, 0
         for _, r in rows.iterrows():
             qty   = float(r["数量"])
-            price = float(r["单价"]) if sel_status == "买入" and "单价" in r else None
-            total = (qty * price) if (sel_status == "买入" and price is not None) else None
-            unit  = str(r.get("单位", "") or "")
+            unit  = str(r.get("单位", "") or "").strip()
+            price = None
+            total = None
+            if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
+                price = float(r["单价"])
+                total = qty * price
 
-            # 注意：写回表格时会把“分类 (Category)”写成你选择的 sel_type
             record = {
                 "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
-                "分类 (Category)": sel_type,
+                "分类 (Category)": sel_type,   # 使用所选大类
                 "数量 (Qty)": qty,
                 "单位 (Unit)": unit,
                 "单价 (Unit Price)": price if sel_status == "买入" else "",
@@ -143,20 +182,9 @@ with tabs[1]:
         st.stop()
 
     # ---------- 关键：清洗/兜底分类 ----------
-    # 如果没有“分类 (Category)”列，创建一个空列
     if "分类 (Category)" not in df.columns:
         df["分类 (Category)"] = ""
-
-    # 统一成字符串并去空白
-    df["分类 (Category)"] = df["分类 (Category)"].astype(str).str.strip()
-
-    # 把无效/空/NaN 的值替换为默认类别
-    def _normalize_cat(x: str) -> str:
-        if not x or x.lower() in ("nan", "none"):
-            return DEFAULT_CAT
-        return x if x in ALLOWED_CATS else DEFAULT_CAT
-
-    df["分类 (Category)"] = df["分类 (Category)"].apply(_normalize_cat)
+    df["分类 (Category)"] = df["分类 (Category)"].astype(str).str.strip().apply(_normalize_cat)
 
     # 计算整体统计（不依赖类别）
     stats_all = compute_stats(df)
@@ -201,7 +229,7 @@ with tabs[1]:
     c1.metric(f"{sel_type} — 记录食材数" if sel_type!="全部" else "记录食材数", value=total_items)
     c2.metric("累计支出", value=f"{(total_spend or 0):.2f}")
     c3.metric(f"≤{warn_days}天即将耗尽", value=need_buy)
-    c4.metric("最近14天有使用记录数", value=recent_usage_count)
+    c4.metric("最近14天可估使用记录数", value=recent_usage_count)
 
     # 统计结果表（只展示计算字段）
     display_cols = [
