@@ -64,29 +64,26 @@ def _fix_col_token(s: str) -> str:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    """
+    统一把表头规范化，直接复用 compute.py 中的实现，
+    解决尾部空格/全角括号/大小写/别名等导致的“未识别列”问题。
+    """
+    try:
+        from compute import normalize_columns as _canon
+        return _canon(df)
+    except Exception:
+        # 如果 compute.normalize_columns 不可用，兜底做基本修复（去空格、全角）
+        if df is None or df.empty:
+            return df
+        fixed = {}
+        for c in df.columns:
+            s = (c or "")
+            s = s.replace("\u3000", " ").replace("（", "(").replace("）", ")").replace("\u00A0", " ").replace("\u200B", "")
+            s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            fixed[c] = s
+        df = df.rename(columns=fixed)
         return df
-    # 先把原始列做字符修复
-    fixed = {_fix_col_token(c): c for c in df.columns}
-    df = df.rename(columns=fixed)
-    # 再做别名匹配（大小写不敏感）
-    lower_map = {c.lower(): c for c in df.columns}
-    mapping = {}
-    for std, alts in ALIASES.items():
-        for a in alts:
-            a_fixed = _fix_col_token(a)
-            if a_fixed in df.columns:
-                mapping[a_fixed] = std; break
-            if a_fixed.lower() in lower_map:
-                mapping[lower_map[a_fixed.lower()]] = std; break
-    df = df.rename(columns=mapping)
-    # 基本类型
-    if "日期 (Date)" in df.columns:
-        df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
-    for col in ["数量 (Qty)","单价 (Unit Price)","总价 (Total Cost)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
 
 def safe_sort(df: pd.DataFrame, by: str, ascending=True):
     if df is None or df.empty or by not in df.columns:
