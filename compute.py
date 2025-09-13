@@ -13,17 +13,17 @@ _FULL_L = "（"
 _FULL_R = "）"
 
 _CANONICAL = {
-    # 规范名 -> 常见别名
-    "日期 (Date)": ["日期", "日期(date)", "date", "Date", "日期 "],
-    "食材名称 (Item Name)": ["食材名称", "食材", "名称", "item name", "item", "品名", "Item Name"],
-    "分类 (Category)": ["分类", "类别", "category", "Category"],
-    "数量 (Qty)": ["数量", "qty", "数量 (qty)", "Qty"],
-    "单位 (Unit)": ["单位", "unit", "Unit"],
-    "单价 (Unit Price)": ["单价", "unit price", "价格/单价", "单价(元)", "Unit Price"],
-    "总价 (Total Cost)": ["总价", "total", "total cost", "金额", "总价(元)", "Total Cost"],
-    "状态 (Status)": ["状态", "status", "Status"],
-    "备注 (Notes)": ["备注", "notes", "note", "Notes"],
+    "日期 (Date)": ["日期", "日期(date)", "date", "Date", "日期 ", "日期(Date)"],
+    "食材名称 (Item Name)": ["食材名称", "食材", "名称", "item name", "item", "品名", "Item Name", "食材名称(Item Name)"],
+    "分类 (Category)": ["分类", "类别", "category", "Category", "分类(Category)"],
+    "数量 (Qty)": ["数量", "qty", "数量 (qty)", "Qty", "数量(Qty)"],
+    "单位 (Unit)": ["单位", "unit", "Unit", "单位(Unit)"],
+    "单价 (Unit Price)": ["单价", "unit price", "价格/单价", "单价(元)", "Unit Price", "单价(Unit Price)"],
+    "总价 (Total Cost)": ["总价", "total", "total cost", "金额", "总价(元)", "Total Cost", "总价(Total Cost)"],
+    "状态 (Status)": ["状态", "status", "Status", "状态(Status)"],
+    "备注 (Notes)": ["备注", "notes", "note", "Notes", "备注(Notes)"],
 }
+
 _FLAT = {k.lower(): k for k in _CANONICAL}
 for k, alts in _CANONICAL.items():
     for a in alts:
@@ -35,9 +35,14 @@ def _clean_token(s: str) -> str:
         return ""
     s = str(s)
     s = s.replace(_NBSP, " ").replace(_FULL_L, "(").replace(_FULL_R, ")").replace("\u200B", "")
-    s = re.sub(r"\s+", " ", s.strip())
-    # 把括号内部空格收紧
+    # ✨ 关键：如果括号前没有空格，自动补一个（例：食材名称(Item Name) → 食材名称 (Item Name)）
+    s = re.sub(r"([\u4e00-\u9fffA-Za-z0-9])\(", r"\1 (", s)
+    # 如果 ) 和下一段文字之间缺空格，补一个
+    s = re.sub(r"\)\s*([A-Za-z0-9\u4e00-\u9fff])", r") \1", s)
+    # 括号内部去多余空格
     s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
+    # 折叠其它空白
+    s = re.sub(r"\s+", " ", s.strip())
     return s
 
 
