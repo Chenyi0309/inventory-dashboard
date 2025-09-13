@@ -1,189 +1,244 @@
+# compute.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import re
+from typing import Tuple, Optional
 import pandas as pd
-from typing import Optional, Tuple, Dict, List
+import numpy as np
 
-# ========= 列名适配 =========
-ALIASES: Dict[str, List[str]] = {
-    "日期 (Date)": ["日期 (Date)", "日期", "Date", "date"],
-    "食材名称 (Item Name)": ["食材名称 (Item Name)", "食材名称", "Item Name", "item name", "物品名", "名称"],
-    "分类 (Category)": ["分类 (Category)", "分类", "Category", "category", "类型"],
-    "数量 (Qty)": ["数量 (Qty)", "数量", "Qty", "qty"],
-    "单位 (Unit)": ["单位 (Unit)", "单位", "Unit", "unit"],
-    "单价 (Unit Price)": ["单价 (Unit Price)", "单价", "Unit Price", "price", "unit price"],
-    "总价 (Total Cost)": ["总价 (Total Cost)", "总价", "Total Cost", "amount", "cost"],
-    "状态 (Status)": ["状态 (Status)", "状态", "Status", "status"],
-    "备注 (Notes)": ["备注 (Notes)", "备注", "Notes", "notes"],
+# =============== 列名规范化（唯一实现；app.py 也复用它） ===============
+_NBSP = "\xa0"
+_FULL_L = "（"
+_FULL_R = "）"
+
+_CANONICAL = {
+    # 规范名 -> 各种可能的别名（宽松匹配）
+    "日期 (Date)": [
+        "日期", "日期(date)", "date", "Date", "日期 ", " 日 期 ", "日期" + _NBSP,
+    ],
+    "食材名称 (Item Name)": [
+        "食材名称", "食材", "名称", "item name", "item", "品名", "Item Name", "食材名称 " + _NBSP,
+    ],
+    "分类 (Category)": ["分类", "类别", "category", "Category"],
+    "数量 (Qty)": ["数量", "qty", "数量 (qty)", "数量 " + _NBSP, "Qty"],
+    "单位 (Unit)": ["单位", "unit", "Unit"],
+    "单价 (Unit Price)": ["单价", "unit price", "价格/单价", "单价(元)", "Unit Price"],
+    "总价 (Total Cost)": ["总价", "total", "total cost", "金额", "总价(元)", "Total Cost"],
+    "状态 (Status)": ["状态", "status", "Status"],
+    "Notes": ["备注", "notes", "note", "Notes"],
 }
 
-import re
+_CANON_KEYS = list(_CANONICAL.keys())
+_FLAT_MAP = {k.lower(): k for k in _CANON_KEYS}
+for canon, alts in _CANONICAL.items():
+    for a in alts:
+        _FLAT_MAP[a.lower()] = canon
 
-def _fix_col_token(s: str) -> str:
-    s = (s or "")
-    # 常见不可见字符 & 全角括号/空格
-    s = s.replace("\u3000", " ")         # 全角空格
-    s = s.replace("（", "(").replace("）", ")")
-    s = s.replace("\u00A0", " ")         # 不换行空格
-    s = s.replace("\u200B", "")          # 零宽空白
-    # 把括号里的空格收紧："(  Date  )" → "(Date)"
-    s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
-    # 去掉 CJK 与括号之间多余空格："日期  (Date)" → "日期 (Date)"
-    s = re.sub(r"([\u4e00-\u9fffA-Za-z0-9])\s+\(", r"\1 (", s)
-    s = re.sub(r"\)\s+([\u4e00-\u9fffA-Za-z0-9])", r") \1", s)
-    # 压缩其余连续空白
-    s = re.sub(r"\s+", " ", s).strip()
+
+def _clean_col_token(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    s = s.replace(_NBSP, " ").replace(_FULL_L, "(").replace(_FULL_R, ")")
+    s = re.sub(r"\s+", " ", s.strip())
     return s
 
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    df = df.rename(columns={_fix_col_token(c): c for c in df.columns})
-    lower_map = {c.lower(): c for c in df.columns}
-    mapping = {}
-    for std, alts in ALIASES.items():
-        for a in alts:
-            af = _fix_col_token(a)
-            if af in df.columns:
-                mapping[af] = std; break
-            if af.lower() in lower_map:
-                mapping[lower_map[af.lower()]] = std; break
-    df = df.rename(columns=mapping)
-    if "日期 (Date)" in df.columns:
-        df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
-    for col in ["数量 (Qty)", "单价 (Unit Price)", "总价 (Total Cost)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
 
-# ========= 小工具 =========
-def _last_of(g: pd.DataFrame, status: str) -> Optional[pd.Series]:
-    if "状态 (Status)" not in g or "日期 (Date)" not in g:
-        return None
-    d = g[g["状态 (Status)"] == status].sort_values("日期 (Date)")
-    if d.empty:
-        return None
-    return d.iloc[-1]
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """把各类中/英/含空格/全角括号的列名统一到规范名；数值列做基础清洗。"""
+    if df is None or len(df) == 0:
+        return df.copy()
 
-def _recent_two_remainders(g: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[pd.Series]]:
-    if "状态 (Status)" not in g or "日期 (Date)" not in g:
+    cols = []
+    for c in df.columns:
+        c0 = _clean_col_token(c)
+        canon = _FLAT_MAP.get(c0.lower())
+        cols.append(canon if canon else c0)
+    out = df.copy()
+    out.columns = cols
+
+    # 统一日期
+    if "日期 (Date)" in out.columns:
+        out["日期 (Date)"] = pd.to_datetime(out["日期 (Date)"], errors="coerce")
+
+    # 数值列：支持 "30%" -> 0.3；"1,234.50" -> 1234.5
+    for num_col in ["数量 (Qty)", "单价 (Unit Price)", "总价 (Total Cost)"]:
+        if num_col in out.columns:
+            s = (
+                out[num_col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.strip()
+            )
+            is_pct = s.str.endswith("%", na=False)
+            s_num = pd.to_numeric(s.str.rstrip("%"), errors="coerce")
+            s_num = np.where(is_pct, s_num / 100.0, s_num)
+            out[num_col] = pd.to_numeric(s_num, errors="coerce")
+
+    # 状态字段收敛
+    if "状态 (Status)" in out.columns:
+        s = out["状态 (Status)"].astype(str).str.strip().str.lower()
+        s = s.replace({"buy": "买入", "purchase": "买入", "剩余量": "剩余", "remain": "剩余"})
+        # 保留原中文
+        out["状态 (Status)"] = np.where(s.str.contains("买"), "买入",
+                                 np.where(s.str.contains("余"), "剩余", out["状态 (Status)"]))
+    return out
+
+
+# ===================== 统计核心 =====================
+
+def _last_remainder(df_item: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
+    """同一物品最近一次“剩余”的日期与数量。"""
+    d = df_item[df_item["状态 (Status)"] == "剩余"].sort_values("日期 (Date)")
+    if len(d) == 0:
         return None, None
-    d = g[g["状态 (Status)"] == "剩余"].sort_values("日期 (Date)")
-    if len(d) < 2:
-        return (None, d.iloc[-1]) if len(d) == 1 else (None, None)
-    return d.iloc[-2], d.iloc[-1]
+    row = d.iloc[-1]
+    return row["日期 (Date)"], float(row["数量 (Qty)"]) if pd.notna(row["数量 (Qty)"]) else None
 
-# ========= 14 天用量估算（稳健） =========
-def _recent_usage_14d_new(item_df: pd.DataFrame) -> Optional[float]:
-    if item_df is None or item_df.empty:
-        return None
-    item_df = _normalize_columns(item_df)
 
-    prev_r, last_r = _recent_two_remainders(item_df)
-    if prev_r is not None and last_r is not None:
-        between = item_df[(item_df["日期 (Date)"] > prev_r["日期 (Date)"]) &
-                          (item_df["日期 (Date)"] <= last_r["日期 (Date)"])]
-        has_buy_between = (between["状态 (Status)"] == "买入").any()
-        days = max(1, (last_r["日期 (Date)"] - prev_r["日期 (Date)"]).days)
-        q_prev = pd.to_numeric(pd.Series([prev_r["数量 (Qty)"]])).iloc[0]
-        q_last = pd.to_numeric(pd.Series([last_r["数量 (Qty)"]])).iloc[0]
-        if (not has_buy_between) and pd.notna(q_prev) and pd.notna(q_last) and float(q_last) <= float(q_prev):
-            used = float(q_prev) - float(q_last)
-            return (used / days) * 14.0 if days > 0 else None
+def _last_purchase_info(df_item: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """最近一次买入的日期/数量/单价，以及平均采购间隔（天）与累计支出。"""
+    b = df_item[df_item["状态 (Status)"] == "买入"].sort_values("日期 (Date)")
+    if len(b) == 0:
+        return None, None, None, None, 0.0
+    last = b.iloc[-1]
+    # 平均采购间隔
+    avg_int = None
+    if len(b) >= 2:
+        diffs = b["日期 (Date)"].diff().dt.days.dropna()
+        if len(diffs):
+            avg_int = float(np.mean(diffs))
+    total_spend = b.get("总价 (Total Cost)")
+    total_spend = float(total_spend.sum()) if total_spend is not None else 0.0
+    return (
+        last["日期 (Date)"],
+        float(last["数量 (Qty)"]) if pd.notna(last["数量 (Qty)"]) else None,
+        float(last.get("单价 (Unit Price)", np.nan)) if pd.notna(last.get("单价 (Unit Price)", np.nan)) else None,
+        float(avg_int) if avg_int is not None else None,
+        total_spend
+    )
 
-    last_buy = _last_of(item_df, "买入")
-    last_rem = _last_of(item_df, "剩余")
-    if last_buy is not None and last_rem is not None and last_rem["日期 (Date)"] >= last_buy["日期 (Date)"]:
-        q_buy  = pd.to_numeric(pd.Series([last_buy["数量 (Qty)"]])).iloc[0]
-        q_rem  = pd.to_numeric(pd.Series([last_rem["数量 (Qty)"]])).iloc[0]
-        if pd.notna(q_buy) and pd.notna(q_rem):
-            days = max(1, (last_rem["日期 (Date)"] - last_buy["日期 (Date)"]).days)
-            used = max(0.0, float(q_buy) - float(q_rem))
-            return (used / days) * 14.0 if days > 0 else None
+
+def _recent_usage_14d(df_item: pd.DataFrame, asof: Optional[pd.Timestamp]) -> Optional[float]:
+    """
+    估算最近两周使用量（优先：两次连续“剩余”且后一次 <= 前一次；否则：最近“买入”到最近“剩余”）。
+    返回14天总用量（不是日均）。
+    """
+    x = df_item.sort_values("日期 (Date)")
+
+    # 1) 连续两次“剩余”，中间没有“买入”
+    r = x[x["状态 (Status)"] == "剩余"][["日期 (Date)", "数量 (Qty)"]].dropna().reset_index(drop=True)
+    if len(r) >= 2:
+        r_prev = r.iloc[-2]
+        r_last = r.iloc[-1]
+        # 检查两次之间是否存在买入
+        between = x[(x["日期 (Date)"] > r_prev["日期 (Date)"]) & (x["日期 (Date)"] <= r_last["日期 (Date)"])]
+        if not any(between["状态 (Status)"] == "买入"):
+            prev_qty = float(r_prev["数量 (Qty)"])
+            last_qty = float(r_last["数量 (Qty)"])
+            if pd.notna(prev_qty) and pd.notna(last_qty) and last_qty <= prev_qty:
+                days = (r_last["日期 (Date)"] - r_prev["日期 (Date)"]).days
+                if days > 0:
+                    daily = (prev_qty - last_qty) / days
+                    if daily >= 0:
+                        return float(daily * 14.0)
+
+    # 2) 最近“买入”-> 最近“剩余”
+    b = x[x["状态 (Status)"] == "买入"][["日期 (Date)", "数量 (Qty)"]].dropna()
+    r = x[x["状态 (Status)"] == "剩余"][["日期 (Date)", "数量 (Qty)"]].dropna()
+    if len(b) >= 1 and len(r) >= 1:
+        b_last = b.iloc[-1]
+        r_last = r.iloc[-1]
+        if r_last["日期 (Date)"] >= b_last["日期 (Date)"]:
+            days = (r_last["日期 (Date)"] - b_last["日期 (Date)"]).days
+            if days > 0:
+                used = float(b_last["数量 (Qty)"]) - float(r_last["数量 (Qty)"])
+                daily = used / days
+                if daily >= 0:
+                    return float(daily * 14.0)
+
     return None
 
-_recent_usage_14d_robust = _recent_usage_14d_new
 
-def _current_stock(g: pd.DataFrame) -> Optional[float]:
-    g = _normalize_columns(g)
-    last_r = _last_of(g, "剩余")
-    if last_r is None:
-        return None
-    q = pd.to_numeric(pd.Series([last_r["数量 (Qty)"]]), errors="coerce").iloc[0]
-    return float(q) if pd.notna(q) else None
+def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    输入：原始记录（买入/剩余）
+    输出：每个“食材名称”的统计表：
+      - 当前库存（最近一次“剩余”的数量）
+      - 平均最近两周使用量（14天总量）
+      - 预计还能用天数 = 当前库存 / (两周用量/14)
+      - 计算下次采购量 = max(0, 两周用量 - 当前库存)
+      - 最近统计剩余日期 / 最近采购日期 / 平均采购间隔(天)
+      - 最近采购数量 / 最近采购单价
+      - 累计支出（按买入 Total Cost 求和）
+    """
+    df = normalize_columns(df)
 
-def _days_left(curr_stock: Optional[float], use_14d: Optional[float]) -> Optional[float]:
-    if curr_stock is None or use_14d is None or use_14d <= 0:
-        return None
-    daily = use_14d / 14.0
-    return curr_stock / daily if daily > 0 else None
-
-def _next_purchase_qty(curr_stock: Optional[float], use_14d: Optional[float]) -> Optional[float]:
-    if use_14d is None:
-        return None
-    target = use_14d
-    return max(0.0, target - (curr_stock or 0.0))
-
-# ========= 主函数：按“食材名称”汇总 =========
-def compute_stats(records: pd.DataFrame) -> pd.DataFrame:
-    if records is None or records.empty:
-        return pd.DataFrame(columns=[
-            "食材名称 (Item Name)", "当前库存", "平均最近两周使用量", "预计还能用天数", "计算下次采购量",
-            "最近统计剩余日期", "最近采购日期", "最近采购数量", "最近采购单价",
-            "平均采购间隔(天)", "累计支出"
-        ])
-
-    df = _normalize_columns(records.copy())
-
-    # 必要字段检查
     must = ["食材名称 (Item Name)", "日期 (Date)", "状态 (Status)", "数量 (Qty)"]
-    if any(c not in df.columns for c in must):
+    missing = [c for c in must if c not in df.columns]
+    if missing:
         return pd.DataFrame(columns=[
             "食材名称 (Item Name)", "当前库存", "平均最近两周使用量", "预计还能用天数", "计算下次采购量",
-            "最近统计剩余日期", "最近采购日期", "最近采购数量", "最近采购单价",
-            "平均采购间隔(天)", "累计支出"
+            "最近统计剩余日期", "最近采购日期", "平均采购间隔(天)", "最近采购数量", "最近采购单价", "累计支出"
         ])
 
-    out = []
+    # 分组逐个物品计算
+    rows = []
+    # 只用有效日期
+    df = df[pd.notna(df["日期 (Date)"])].copy()
+
     for item, g in df.groupby("食材名称 (Item Name)"):
-        g = g.sort_values("日期 (Date)")
+        g = g.sort_values("日期 (Date)").reset_index(drop=True)
 
-        curr_stock = _current_stock(g)
-        use_14d = _recent_usage_14d_new(g)
-        days_left = _days_left(curr_stock, use_14d)
-        next_buy = _next_purchase_qty(curr_stock, use_14d)
+        # 当前库存 = 最近一次“剩余”数量
+        last_rem_date, last_rem_qty = _last_remainder(g)
 
-        last_rem = _last_of(g, "剩余")
-        last_buy = _last_of(g, "买入")
+        # 最近采购信息
+        (last_buy_date, last_buy_qty, last_buy_price,
+         avg_buy_interval, total_spend_item) = _last_purchase_info(g)
 
-        buys = g[g["状态 (Status)"] == "买入"].sort_values("日期 (Date)")
-        if len(buys) >= 2:
-            gaps = buys["日期 (Date)"].diff().dropna().dt.days
-            avg_gap = float(gaps.mean()) if not gaps.empty else None
-        else:
-            avg_gap = None
+        # 最近两周使用量（总量）
+        asof = max(g["日期 (Date)"]) if len(g) else None
+        usage_14 = _recent_usage_14d(g, asof)
 
-        last_buy_qty   = float(pd.to_numeric(pd.Series([last_buy["数量 (Qty)"]]), errors="coerce").iloc[0]) if last_buy is not None else None
-        last_buy_price = float(pd.to_numeric(pd.Series([last_buy["单价 (Unit Price)"]]), errors="coerce").iloc[0]) if (last_buy is not None and "单价 (Unit Price)" in g) else None
-        total_spend    = float(buys["总价 (Total Cost)"].sum()) if "总价 (Total Cost)" in g.columns else None
+        # 预计还能用天数 / 下次采购量（目标保障 14 天）
+        days_left = None
+        next_buy_qty = None
+        if usage_14 is not None and usage_14 > 0 and last_rem_qty is not None:
+            daily = usage_14 / 14.0
+            days_left = float(last_rem_qty / daily) if daily > 0 else None
+            target_14 = usage_14
+            deficit = target_14 - float(last_rem_qty)
+            next_buy_qty = float(np.ceil(deficit)) if deficit > 0 else 0.0
 
-        out.append({
+        rows.append({
             "食材名称 (Item Name)": item,
-            "当前库存": curr_stock,
-            "平均最近两周使用量": use_14d,
-            "预计还能用天数": days_left,
-            "计算下次采购量": next_buy,
-            "最近统计剩余日期": (last_rem["日期 (Date)"] if last_rem is not None else None),
-            "最近采购日期": (last_buy["日期 (Date)"] if last_buy is not None else None),
-            "最近采购数量": last_buy_qty,
-            "最近采购单价": last_buy_price,
-            "平均采购间隔(天)": avg_gap,
-            "累计支出": total_spend,
+            "当前库存": float(last_rem_qty) if last_rem_qty is not None else np.nan,
+            "平均最近两周使用量": float(usage_14) if usage_14 is not None else np.nan,
+            "预计还能用天数": float(days_left) if days_left is not None else np.nan,
+            "计算下次采购量": float(next_buy_qty) if next_buy_qty is not None else np.nan,
+            "最近统计剩余日期": last_rem_date,
+            "最近采购日期": last_buy_date,
+            "平均采购间隔(天)": float(avg_buy_interval) if avg_buy_interval is not None else np.nan,
+            "最近采购数量": float(last_buy_qty) if last_buy_qty is not None else np.nan,
+            "最近采购单价": float(last_buy_price) if last_buy_price is not None else np.nan,
+            "累计支出": float(total_spend_item or 0.0),
         })
 
-    res = pd.DataFrame(out)
-    if not res.empty and "预计还能用天数" in res.columns:
-        res = res.sort_values(["预计还能用天数", "食材名称 (Item Name)"],
-                              ascending=[True, True], na_position="last").reset_index(drop=True)
-    return res
+    out = pd.DataFrame(rows)
+
+    # 展示友好：日期转字符串
+    for c in ["最近统计剩余日期", "最近采购日期"]:
+        if c in out.columns:
+            out[c] = pd.to_datetime(out[c], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    # 排序：优先缺货风险（还能用天数少），再按两周用量多
+    if "预计还能用天数" in out.columns:
+        out = out.sort_values(
+            by=["预计还能用天数", "平均最近两周使用量"],
+            ascending=[True, False],
+            na_position="last"
+        ).reset_index(drop=True)
+
+    return out
