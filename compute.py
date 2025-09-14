@@ -107,9 +107,19 @@ def _current_stock_rule(df_item: pd.DataFrame) -> Optional[float]:
 
     last_rem = rem.iloc[-1]
     last_date = last_rem["日期 (Date)"]
-    last_ord = last_rem["row_order"]
+    last_ord  = last_rem["row_order"]
 
-    mask_after = _between_mask(x, last_date, last_ord, pd.Timestamp.max, include_start=False, include_end=True)
+    # 关键修复：补上 end_ord，并用关键字参数避免位置传参出错
+    BIG_ORD = 10**12  # 足够大的行号上限
+    mask_after = _between_mask(
+        x,
+        start_date=last_date,
+        start_ord=last_ord,
+        end_date=pd.Timestamp.max,
+        end_ord=BIG_ORD,
+        include_start=False,
+        include_end=True
+    )
     buys_after = x[mask_after & (x["状态 (Status)"] == "买入")]
     return float(buys_after["数量 (Qty)"].sum()) if not buys_after.empty else 0.0
 
