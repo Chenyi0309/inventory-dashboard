@@ -27,6 +27,9 @@ except Exception:  # pragma: no cover
 SHEET_URL_ENV = "INVENTORY_SHEET_URL"     # .streamlit/secrets 或环境变量里配置的表格 URL
 TARGET_WS_TITLE = "购入/剩余"               # 目标工作表（tab）名
 
+# 主数据（库存产品）可能的工作表名（按顺序尝试）
+CATALOG_WS_TITLES = ["库存产品", "产品库", "Catalog", "Products"]
+
 # Sheets/Drive 权限作用域
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -129,9 +132,79 @@ def read_records() -> pd.DataFrame:
     return df
 
 
-# 如果你后面要接“库存产品”主数据，可在此实现
+# ======== 库存产品（主数据）读取 ========
+def _open_catalog_ws():
+    """
+    定位『库存产品』工作表：
+    1) 优先按常见表名直连；
+    2) 找不到则遍历各 tab，凡是首行同时含“物品名/单位”的都视为候选。
+    """
+    sh = _open_sheet()
+
+    # 1) 按名称直连
+    for name in CATALOG_WS_TITLES:
+        try:
+            return sh.worksheet(name)
+        except Exception:
+            pass
+
+    # 2) 遍历寻找：首行同时含有“物品名/单位”（允许有别的列）
+    for ws in sh.worksheets():
+        try:
+            header = [str(x).strip() for x in ws.row_values(1)]
+        except Exception:
+            header = []
+        has_name = any(col in header for col in ["物品名", "食材名称 (Item Name)", "名称", "品名"])
+        has_unit = any(col in header for col in ["单位", "单位 (Unit)", "Unit"])
+        if has_name and has_unit:
+            return ws
+
+    raise RuntimeError("找不到『库存产品』工作表；请新建一个包含列「物品名 / 类型 / 单位」的工作表（默认名：库存产品）。")
+
+
 def read_catalog() -> pd.DataFrame:
-    return pd.DataFrame()
+    """
+    读取『库存产品』主数据：
+    - 返回至少包含列「物品名」「类型」「单位」的 DataFrame；
+    - 自动把常见别名列统一到标准名；
+    - 去空白与去重（以物品名为准）。
+    """
+    ws = _open_catalog_ws()
+    data = ws.get_all_records()  # 以首行作为 header
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        # 确保返回结构齐全，避免上层逻辑出错
+        for col in ["物品名", "类型", "单位"]:
+            df[col] = ""
+        return df[["物品名", "类型", "单位"]]
+
+    # 列名标准化：把常见别名统一到 物品名/类型/单位
+    rename_map = {
+        "食材名称 (Item Name)": "物品名",
+        "名称": "物品名",
+        "品名": "物品名",
+        "Category": "类型",
+        "分类": "类型",
+        "分类 (Category)": "类型",
+        "Unit": "单位",
+        "单位 (Unit)": "单位",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    # 只保留核心列，缺失列补空
+    for col in ["物品名", "类型", "单位"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # 去空白、去重（以物品名为准）
+    df["物品名"] = df["物品名"].astype(str).str.strip()
+    df["类型"] = df["类型"].astype(str).str.strip()
+    df["单位"] = df["单位"].astype(str).str.strip()
+    df = df[df["物品名"] != ""].drop_duplicates(subset=["物品名"], keep="last")
+
+    # 保留其它列（如备注）不影响上层使用
+    return df
 
 
 @lru_cache(maxsize=1)
