@@ -17,7 +17,7 @@ if sheet_url:
     os.environ["INVENTORY_SHEET_URL"] = sheet_url
 
 # ================ Backend ======================
-from gsheet import append_record
+from gsheet import append_record, append_records_bulk
 try:
     from gsheet import read_records_cached as read_records_fn, read_catalog_cached as read_catalog_fn, bust_cache
 except Exception:
@@ -136,9 +136,9 @@ with tabs[0]:
     )
 
     if st.button("✅ 批量保存到『购入/剩余』"):
-    rows = edited.copy()
-    rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
-    rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
+        rows = edited.copy()
+        rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
+        rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
     if rows.empty:
         st.warning("请至少填写一个物品的‘物品名’和‘数量’")
         st.stop()
