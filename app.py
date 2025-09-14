@@ -152,20 +152,23 @@ with tabs[0]:
             st.warning("请至少填写一个物品的‘物品名’和‘数量’")
             st.stop()
 
-        # 2) 组装成要写入表格的 dict 列表（批量）
+        # 2) 组装成要写入表格的 dict 列表（批量）＋ 预览明细
+        dt = pd.to_datetime(sel_date)           # 日期只算一次
         payload = []
+        preview = []                            # 给用户看的写入明细
+
         for _, r in rows.iterrows():
             qty   = float(r["数量"])
             unit  = str(r.get("单位", "") or "").strip()
+
             price = None
             total = None
             if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
                 price = float(r["单价"])
                 total = qty * price
-                
-            d = pd.to_datetime(sel_date)
+
             record = {
-                "日期 (Date)": f"=DATE({d.year},{d.month},{d.day})",
+                "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
                 "分类 (Category)": sel_type,
                 "数量 (Qty)": qty,
@@ -177,15 +180,45 @@ with tabs[0]:
             }
             payload.append(record)
 
-        # 3) 批量写入
+            # 预览用的精简行
+            row_preview = {
+                "日期": dt.date().isoformat(),
+                "物品名": str(r["物品名"]).strip(),
+                "数量": qty,
+                "单位": unit,
+                "状态": sel_status,
+            }
+            if sel_status == "买入":
+                row_preview["单价"] = price if price is not None else ""
+                row_preview["总价"] = total if total is not None else ""
+            preview.append(row_preview)
+
+        # 3) 批量写入 + 显示写入明细
         try:
             if payload:
                 append_records_bulk(payload)
                 st.success(f"已成功写入 {len(payload)} 条记录！")
+
+                import pandas as pd
+                pre_df = pd.DataFrame(preview)
+                # 更友好的列顺序
+                if sel_status == "买入":
+                    pre_df = pre_df[["日期", "物品名", "数量", "单位", "单价", "总价", "状态"]]
+                    # 小计
+                    with pd.option_context("mode.use_inf_as_na", True):
+                        total_spent = pd.to_numeric(pre_df.get("总价"), errors="coerce").sum()
+                    st.caption(f"本次买入合计金额：{total_spent:.2f}")
+                else:
+                    pre_df = pre_df[["日期", "物品名", "数量", "单位", "状态"]]
+
+                st.markdown("**本次写入的记录**")
+                st.dataframe(pre_df, use_container_width=True)
+
             else:
                 st.info("没有可写入的记录。")
         except Exception as e:
             st.error(f"保存失败：{e}")
+
 
 from gsheet import debug_list_sheets, debug_service_email, try_write_probe
 with st.expander("🔧 写入自检", expanded=False):
