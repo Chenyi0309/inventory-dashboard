@@ -162,9 +162,10 @@ with tabs[0]:
             if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
                 price = float(r["单价"])
                 total = qty * price
-
+                
+            d = pd.to_datetime(sel_date)
             record = {
-                "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
+                "日期 (Date)": f"=DATE({d.year},{d.month},{d.day})",
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
                 "分类 (Category)": sel_type,
                 "数量 (Qty)": qty,
