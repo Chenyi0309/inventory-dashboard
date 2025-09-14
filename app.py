@@ -222,6 +222,50 @@ with st.expander("🛠 写入自检 / 回读校验", expanded=False):
     except Exception as e:
         st.error(f"回读失败：{e}")
 
+import random, string, datetime as dt
+
+st.markdown("---")
+if st.button("📌 写入一条测试记录（诊断用，不影响统计）"):
+    try:
+        from gsheet import _get_ws, bust_cache
+        ws = _get_ws()
+
+        # 构造一个不会和真实数据混淆的测试行（带随机token）
+        token = "TEST_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        header = ws.row_values(1)
+        # 做一个最小可写的记录字典
+        test_record = {
+            "日期 (Date)": dt.date.today().strftime("%Y-%m-%d"),
+            "食材名称 (Item Name)": token,
+            "分类 (Category)": "测试",
+            "数量 (Qty)": 0.01,
+            "单位 (Unit)": "个",
+            "状态 (Status)": "买入",
+            "备注 (Notes)": "diagnose append"
+        }
+        # 按表头映射
+        row = [test_record.get(col, "") for col in header]
+
+        # 直接调用 gspread 写入，拿到响应/异常
+        resp = ws.append_row(row, value_input_option="USER_ENTERED")
+        bust_cache()
+
+        st.success(f"✅ 诊断写入 OK. resp={resp}")
+        # 回读末尾 5 行给你看
+        df_chk2 = read_records_fn()
+        try:
+            df_chk2 = normalize_columns_compute(df_chk2)
+        except:
+            pass
+        cols = [c for c in ["日期 (Date)","食材名称 (Item Name)","分类 (Category)","数量 (Qty)","单位 (Unit)","状态 (Status)","备注 (Notes)"] if c in df_chk2.columns]
+        st.caption("回读：末尾 5 行（应包含测试行）")
+        st.dataframe(df_chk2.tail(5)[cols], use_container_width=True)
+
+    except Exception as e:
+        st.error(f"❌ 诊断写入失败：{e}")
+        st.info("如果看到 'The caller does not have permission' 或 'insufficient permissions'，说明服务账号只有查看权限或被范围保护拦截。")
+
+
 # ================== 库存统计 ==================
 with tabs[1]:
     st.subheader("库存统计")
