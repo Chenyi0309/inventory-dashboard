@@ -51,8 +51,10 @@ def normalize_cat(x: str) -> str:
     return s if s in ALLOWED_CATS else DEFAULT_CAT
 
 # ================ APP UI =======================
-st.set_page_config(page_title="库存管理 Dashboard", layout="wide")
-st.title("🍱 库存管理 Dashboard")
+st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
+# 显示饭店 logo（建议放到项目目录里，例如 "gangnam_logo.png"）
+st.image("gangnam_logo.png", width=200)   # 调整宽度合适即可
+st.title("Gangnam 库存管理")
 st.caption("录入‘买入/剩余’，自动保存到表格，并实时生成‘库存统计’分析")
 
 tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
@@ -164,7 +166,7 @@ with tabs[0]:
 
 # ================== 库存统计 ==================
 with tabs[1]:
-    st.subheader("库存统计（最近 14 天用量估算）")
+    st.subheader("库存统计")
 
     colR1, _ = st.columns([1, 3])
     if colR1.button("🔄 刷新数据", help="清空缓存并重新读取 Google Sheet"):
@@ -256,7 +258,7 @@ with tabs[1]:
     # 仅保留一个 KPI：记录食材数（删除其余三块）
     c1, = st.columns(1)
     total_items = int(stats["食材名称 (Item Name)"].nunique()) if not stats.empty and "食材名称 (Item Name)" in stats.columns else 0
-    c1.metric("记录食材数", value=total_items)
+    c1.metric("记录数量", value=total_items)
 
     # 结果表
     display_cols = [
@@ -355,15 +357,29 @@ with tabs[1]:
         ev = item_df[item_df["日期 (Date)"] >= lookback][["日期 (Date)","状态 (Status)","数量 (Qty)","单价 (Unit Price)"]].copy()
         if not ev.empty:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
-            chart_ev = alt.Chart(ev).mark_point(filled=True).encode(
+
+            # 颜色映射：按“买入/剩余”两类指定固定颜色
+            status_color = alt.Color(
+                "状态 (Status):N",
+                scale=alt.Scale(
+                    domain=["买入", "剩余"],               # 类别顺序（确保颜色不会乱）
+                    range=["#1f77b4", "#E4572E"]          # 对应颜色（可改成你喜欢的）
+                ),
+                legend=alt.Legend(title="状态")
+            )
+
+            chart_ev = alt.Chart(ev).mark_point(filled=True, size=80).encode(
                 x=alt.X("dt:T", title="日期"),
                 y=alt.Y("数量 (Qty):Q"),
-                shape="状态 (Status):N",
+                color=status_color,                      # ← 新增：颜色通道
+                shape="状态 (Status):N",                 # 保留形状区分（可删）
                 tooltip=["状态 (Status)","数量 (Qty)","单价 (Unit Price)","日期 (Date)"]
             ).properties(title=f"{picked} — 事件时间线（近60天）")
+
             st.altair_chart(chart_ev, use_container_width=True)
 
-        # 最近记录（原始）
+
+        # 最近记录
         st.markdown(" ")
         st.markdown("#### 最近记录（原始）")
         cols = ["日期 (Date)","状态 (Status)","数量 (Qty)","单位 (Unit)","单价 (Unit Price)","总价 (Total Cost)","分类 (Category)","备注 (Notes)"]
