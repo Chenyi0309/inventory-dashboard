@@ -1,7 +1,9 @@
 # gsheet.py
+# -*- coding: utf-8 -*-
 import os
 import json
 import time
+import random
 from functools import lru_cache
 from typing import List, Dict, Tuple
 
@@ -9,10 +11,22 @@ import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
 
+try:
+    # 有的环境会有 googleapiclient 的 HttpError
+    from googleapiclient.errors import HttpError  # type: ignore
+except Exception:  # pragma: no cover
+    HttpError = None  # 兼容不存在的情况
+
+try:
+    # gspread 自己的 APIError
+    from gspread.exceptions import APIError  # type: ignore
+except Exception:  # pragma: no cover
+    APIError = None
+
 
 # ======== 常量 ========
-SHEET_URL_ENV = "INVENTORY_SHEET_URL"         # .streamlit/secrets 或环境变量里配置的表格 URL
-TARGET_WS_TITLE = "购入/剩余"                     # 目标工作表（tab）名
+SHEET_URL_ENV = "INVENTORY_SHEET_URL"   # .streamlit/secrets 或环境变量里配置的表格 URL
+TARGET_WS_TITLE = "购入/剩余"             # 目标工作表（tab）名
 
 # Sheets/Drive 权限作用域
 SCOPES = [
@@ -115,6 +129,56 @@ def read_catalog_cached() -> pd.DataFrame:
     return read_catalog()
 
 
+# ======== 写入：指数退避重试封装 ========
+def _is_429(err: Exception) -> bool:
+    """
+    尽量稳健地识别“配额/限流”错误（429），兼容不同异常类型/字段。
+    """
+    # googleapiclient.errors.HttpError
+    if HttpError and isinstance(err, HttpError):
+        try:
+            status = getattr(getattr(err, "resp", None), "status", None)
+            if str(status) == "429":
+                return True
+        except Exception:
+            pass
+
+    # gspread.exceptions.APIError
+    if APIError and isinstance(err, APIError):
+        try:
+            status = getattr(getattr(err, "response", None), "status_code", None)
+            if str(status) == "429":
+                return True
+        except Exception:
+            pass
+
+    # 兜底：看错误串
+    s = str(err).lower()
+    if "429" in s or "ratelimit" in s or "quota" in s:
+        return True
+    return False
+
+
+def _retry(operation, *, max_retries: int = 5, base_delay: float = 1.0):
+    """
+    通用重试：遇到 429 则指数退避 + 抖动，其余异常直接抛出。
+    """
+    delay = base_delay
+    last = None
+    for _ in range(max_retries):
+        try:
+            return operation()
+        except Exception as e:  # noqa
+            last = e
+            if _is_429(e):
+                time.sleep(delay + random.uniform(0, 0.25))
+                delay *= 2
+                continue
+            raise
+    # 多次 429 仍失败
+    raise RuntimeError("Google Sheets 限流(429)，多次重试仍失败") from last
+
+
 # ======== 写入：单行 & 批量 ========
 def append_record(record: Dict) -> Tuple[int, dict]:
     """
@@ -125,14 +189,13 @@ def append_record(record: Dict) -> Tuple[int, dict]:
     header = _header_cached()  # 使用缓存的表头
     row = [record.get(col, "") for col in header]
 
-    # 追加单行（用户输入格式）
-    resp = ws.append_row(row, value_input_option="USER_ENTERED")
+    # 带重试的单行追加
+    resp = _retry(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
 
     # 写完清缓存（保证后续读到最新数据）
     bust_cache()
 
-    # gspread 对 append_row 不返回新行号，这里返回当前 used_range 的近似值即可
-    # 如果需要精准行号，可以额外读取最后一行比对；为了节省配额，这里选择“近似返回”
+    # gspread 对 append_row 不返回新行号，这里返回当前 row_count 的近似值即可
     return (ws.row_count, resp)
 
 
@@ -147,12 +210,10 @@ def append_records_bulk(records: List[Dict]) -> dict:
     ws = _get_ws()
     header = _header_cached()  # 使用缓存的表头
 
-    rows = []
-    for r in records:
-        rows.append([r.get(col, "") for col in header])
+    rows = [[r.get(col, "") for col in header] for r in records]
 
-    # 一次性写入
-    resp = ws.append_rows(rows, value_input_option="USER_ENTERED")
+    # 一次性写入（带重试）
+    resp = _retry(lambda: ws.append_rows(rows, value_input_option="USER_ENTERED"))
 
     # 写完清缓存
     bust_cache()
@@ -163,21 +224,22 @@ def append_records_bulk(records: List[Dict]) -> dict:
 def try_write_probe() -> bool:
     """
     诊断用的小写入（写一条“__probe__”，立即删除）。用于判断权限/配额是否允许写。
-    注意：本函数会产生两次写请求（append + clear）。
+    注意：本函数会产生两次写请求（append + delete）。
     """
     ws = _get_ws()
     header = _header_cached()
-    # 构造与表头等长的行，第一列放日期方便你在表里辨识
+
+    # 构造与表头等长的行，第一列放一个标记便于在表里辨识
     row = ["__probe__"] + [""] * (len(header) - 1)
-    ws.append_row(row, value_input_option="USER_ENTERED")
+
+    _retry(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
     bust_cache()
 
-    # 马上清除最后一行，避免污染数据
-    last_row_index = ws.row_count
+    # 尝试删除最后一行（不是强制的，有些情况下 row_count 与已用行不完全一致）
     try:
-        ws.delete_rows(last_row_index)
+        _retry(lambda: ws.delete_rows(ws.row_count))
     except Exception:
-        # 某些情况下 row_count 不是实际“已用行”，这里忽略异常即可
         pass
+
     bust_cache()
     return True
