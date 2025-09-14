@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
-from typing import Optional, Tuple
+from typing import Optional
 import pandas as pd
 import numpy as np
 
-# ============= 列名规范化（含脏数据清洗） =============
+# ======================== 列名规范化（含脏数据清洗） ========================
+
 _NBSP = "\xa0"
 _FULL_L = "（"
 _FULL_R = "）"
@@ -44,8 +45,10 @@ def _clean_token(s: str) -> str:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """把各类变体表头统一为标准列；把日期/数字列转为合适类型。"""
     if df is None or df.empty:
         return df.copy()
+
     cols = []
     for c in df.columns:
         c0 = _clean_token(c)
@@ -74,12 +77,26 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ===================== 区间筛选（含同日行序） =====================
+# ======================== 公用小工具 ========================
+
+def _with_row_order(df: pd.DataFrame) -> pd.DataFrame:
+    """确保存在 row_order 列，并按 日期 + row_order 升序返回副本。"""
+    if df is None or df.empty:
+        return df.copy()
+    x = df.copy().reset_index(drop=False).rename(columns={"index": "__orig_idx__"})
+    if "row_order" not in x.columns:
+        x["row_order"] = x["__orig_idx__"]
+    if "日期 (Date)" in x.columns:
+        x["日期 (Date)"] = pd.to_datetime(x["日期 (Date)"], errors="coerce")
+    return x.sort_values(["日期 (Date)", "row_order"]).reset_index(drop=True)
+
+
 def _between_mask(df: pd.DataFrame,
                   start_date, start_ord: int,
                   end_date, end_ord: int,
                   include_start: bool = False,
                   include_end: bool = False) -> pd.Series:
+    """日期+行号开闭区间掩码。"""
     # 左端
     left = (df["日期 (Date)"] > start_date) | ((df["日期 (Date)"] == start_date) & (df["row_order"] > start_ord))
     if include_start:
@@ -91,81 +108,85 @@ def _between_mask(df: pd.DataFrame,
     return left & right
 
 
-# ===================== 规则 1：当前库存 =====================
+# ======================== 规则 1：当前库存 ========================
+
 def _current_stock_rule(df_item: pd.DataFrame) -> Optional[float]:
     """
-    - 找到最后一条“剩余”（按 日期升序 + 行号 row_order 升序）
-    - 库存 = 该条之后（更晚日期，或同日但行号更大）的所有“买入”数量之和
-    - 若没有任何“剩余”，则库存 = 全部“买入”数量之和
+    当前库存：
+      - 以最后一条“剩余”为基准：当前库存 = 该条“剩余”的数量 + 这条之后的所有“买入”数量之和
+      - 若没有任何“剩余”，则库存 = 全部“买入”数量之和
     """
-    x = df_item.sort_values(["日期 (Date)", "row_order"]).reset_index(drop=True)
+    x = _with_row_order(df_item)
 
     rem = x[x["状态 (Status)"] == "剩余"]
+    buys = x[x["状态 (Status)"] == "买入"]
+
     if rem.empty:
-        buys = x[x["状态 (Status)"] == "买入"]
         return float(buys["数量 (Qty)"].sum()) if not buys.empty else np.nan
 
     last_rem = rem.iloc[-1]
     last_date = last_rem["日期 (Date)"]
     last_ord  = last_rem["row_order"]
+    last_qty  = float(last_rem["数量 (Qty)"]) if pd.notna(last_rem["数量 (Qty)"]) else 0.0
 
-    # 关键修复：补上 end_ord，并用关键字参数避免位置传参出错
-    BIG_ORD = 10**12  # 足够大的行号上限
+    BIG_ORD = 10**12
     mask_after = _between_mask(
         x,
-        start_date=last_date,
-        start_ord=last_ord,
-        end_date=pd.Timestamp.max,
-        end_ord=BIG_ORD,
-        include_start=False,
-        include_end=True
+        start_date=last_date, start_ord=last_ord,
+        end_date=pd.Timestamp.max, end_ord=BIG_ORD,
+        include_start=False, include_end=True
     )
     buys_after = x[mask_after & (x["状态 (Status)"] == "买入")]
-    return float(buys_after["数量 (Qty)"].sum()) if not buys_after.empty else 0.0
+    sum_after  = float(buys_after["数量 (Qty)"].sum()) if not buys_after.empty else 0.0
+
+    return float(last_qty + sum_after)
 
 
-# ===================== 规则 2：平均最近两周使用量 =====================
+# ======================== 规则 2：平均最近两周使用量 ========================
+
 def _usage_14d_rule(df_item: pd.DataFrame) -> Optional[float]:
     """
     以最后一条“剩余”为窗口终点：
-      - 若窗口内出现“连续两次剩余，第二次数量更大，且其间无买入”（视为漏记买入），
-        则从第二次剩余作为起点；
-      - 否则选取最接近“14天前”的剩余（先窗口内，后窗口外回退）。
+      - 若窗口内出现“连续两次剩余，第二次数量更大，且其间无买入”（视为漏记买入），从第二次剩余起算；
+      - 否则选择最接近“14天前”的剩余（先窗口内；否则回退窗口外最近一条）。
       用量 = (期间买入之和 + 起点剩余 − 终点剩余) / 间隔天数 × 14
     """
-    x = df_item.sort_values(["日期 (Date)", "row_order"]).reset_index(drop=True)
+    x = _with_row_order(df_item)
     if x.empty:
         return None
 
-    # 终点：最后一条“剩余”
     rem = x[x["状态 (Status)"] == "剩余"]
     if rem.empty:
         return None
+
     r_last = rem.iloc[-1]
     end_date = r_last["日期 (Date)"]
-    end_ord = r_last["row_order"]
-    end_qty = float(r_last["数量 (Qty)"]) if pd.notna(r_last["数量 (Qty)"]) else None
+    end_ord  = r_last["row_order"]
+    end_qty  = float(r_last["数量 (Qty)"]) if pd.notna(r_last["数量 (Qty)"]) else None
     if end_qty is None:
         return None
 
     target_start = end_date - pd.Timedelta(days=14)
 
-    # A. 查漏记买入模式（连续两次剩余且第二次更大，且中间无买入）
+    # A. 漏记买入模式：窗口内 连续两次“剩余” & 第二次数量更大 & 其间无买入
     rem_win = rem[(rem["日期 (Date)"] >= target_start) & (rem["日期 (Date)"] <= end_date)].reset_index(drop=True)
     leak_start_row = None
     if len(rem_win) >= 2:
         for i in range(len(rem_win) - 1):
             r1, r2 = rem_win.iloc[i], rem_win.iloc[i + 1]
             if float(r2["数量 (Qty)"]) > float(r1["数量 (Qty)"]):
-                mask_mid = _between_mask(x, r1["日期 (Date)"], r1["row_order"],
-                                         r2["日期 (Date)"], r2["row_order"],
-                                         include_start=False, include_end=False)
+                mask_mid = _between_mask(
+                    x,
+                    start_date=r1["日期 (Date)"], start_ord=r1["row_order"],
+                    end_date=r2["日期 (Date)"], end_ord=r2["row_order"],
+                    include_start=False, include_end=False
+                )
                 if not any(x.loc[mask_mid, "状态 (Status)"] == "买入"):
                     leak_start_row = r2
     if leak_start_row is not None:
         start_row = leak_start_row
     else:
-        # B. 找离 target_start 最近的“起点剩余”
+        # B. 选最接近 target_start 的“剩余”：优先窗口内最早；否则窗口外向前最近
         rem_all = rem[rem["日期 (Date)"] <= end_date].copy()
         cand_in = rem_all[rem_all["日期 (Date)"] >= target_start]
         if not cand_in.empty:
@@ -177,13 +198,18 @@ def _usage_14d_rule(df_item: pd.DataFrame) -> Optional[float]:
             start_row = cand_out.sort_values(["日期 (Date)", "row_order"]).iloc[-1]
 
     start_date = start_row["日期 (Date)"]
-    start_ord = start_row["row_order"]
-    start_qty = float(start_row["数量 (Qty)"]) if pd.notna(start_row["数量 (Qty)"]) else None
+    start_ord  = start_row["row_order"]
+    start_qty  = float(start_row["数量 (Qty)"]) if pd.notna(start_row["数量 (Qty)"]) else None
     if start_qty is None:
         return None
 
     # 区间买入之和（开区间起点，闭区间终点）
-    mask_period = _between_mask(x, start_date, start_ord, end_date, end_ord, include_start=False, include_end=True)
+    mask_period = _between_mask(
+        x,
+        start_date=start_date, start_ord=start_ord,
+        end_date=end_date,   end_ord=end_ord,
+        include_start=False, include_end=True
+    )
     buys = x[mask_period & (x["状态 (Status)"] == "买入")]
     sum_buys = float(buys["数量 (Qty)"].sum()) if not buys.empty else 0.0
 
@@ -199,15 +225,22 @@ def _usage_14d_rule(df_item: pd.DataFrame) -> Optional[float]:
     return float(daily * 14.0)
 
 
-# 兼容 app.py 的旧导入
+# 兼容 app.py 的导入别名
 def _recent_usage_14d_robust(df_item: pd.DataFrame) -> Optional[float]:
     return _usage_14d_rule(df_item)
 
 
-# ===================== 对外主函数 =====================
+# ======================== 对外主函数 ========================
+
 def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
     """
-    输出列（新增：单位 (Unit)、最近剩余数量；不再产出“计算下次采购量”）
+    生成统计汇总（供 app 展示）：
+      - 当前库存（规则 1）
+      - 平均最近两周使用量（规则 2）
+      - 预计还能用天数
+      - 最近统计剩余日期 / 最近采购日期 / 最近采购数量 / 最近采购单价
+      - 平均采购间隔(天) / 累计支出
+      - 单位 (Unit) / 最近剩余数量（供预警使用）
     """
     df = normalize_columns(df)
 
@@ -221,13 +254,14 @@ def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
         ])
 
     df = df[pd.notna(df["日期 (Date)"])].copy()
-    # 用原始顺序生成 row_order，保证“同日先后顺序”
-    df = df.reset_index(drop=False).rename(columns={"index": "__orig_idx__"})
-    df["row_order"] = df["__orig_idx__"]
+    # 主 DataFrame 也补齐 row_order，便于各函数使用
+    if "row_order" not in df.columns:
+        df = df.reset_index(drop=False).rename(columns={"index": "__orig_idx__"})
+        df["row_order"] = df["__orig_idx__"]
 
     rows = []
     for item, g in df.groupby("食材名称 (Item Name)"):
-        g = g.sort_values(["日期 (Date)", "row_order"]).reset_index(drop=True)
+        g = _with_row_order(g)
 
         # 最近剩余
         rem = g[g["状态 (Status)"] == "剩余"]
@@ -241,7 +275,10 @@ def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
         last_buy_price = float(buy.iloc[-1]["单价 (Unit Price)"]) if (not buy.empty and pd.notna(buy.iloc[-1].get("单价 (Unit Price)", np.nan))) else np.nan
 
         # 单位：最近一条非空
-        last_unit = g["单位 (Unit)"].dropna().astype(str).replace("nan", "").iloc[-1] if "单位 (Unit)" in g.columns and len(g["单位 (Unit)"].dropna()) else ""
+        if "单位 (Unit)" in g.columns and len(g["单位 (Unit)"].dropna()):
+            last_unit = g["单位 (Unit)"].dropna().astype(str).replace("nan", "").iloc[-1]
+        else:
+            last_unit = ""
 
         # 规则 1：当前库存
         cur_stock = _current_stock_rule(g)
@@ -249,7 +286,7 @@ def compute_stats(df: pd.DataFrame) -> pd.DataFrame:
         # 规则 2：最近14天用量
         use14 = _usage_14d_rule(g)
 
-        # 还能用天数（保留；如不展示可在 UI 隐去）
+        # 还能用天数
         days_left = np.nan
         if use14 and use14 > 0 and cur_stock is not None and not np.isnan(cur_stock):
             daily = use14 / 14.0
