@@ -53,14 +53,23 @@ def normalize_cat(x: str) -> str:
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
 # 顶部布局：左边 logo，右边标题
-c1, c2 = st.columns([1, 3])   # 左右列比例，可调
+c1, c2 = st.columns([1, 6])   # 左右列比例
 
 with c1:
-    st.image("gangnam_logo.png", width=120)  # 调整宽度适合页面
+    st.image("gangnam_logo.png", width=180)  # 调大图片宽度
 
 with c2:
-    st.title("Gangnam 库存管理")
-    st.caption("录入‘买入/剩余’，自动保存到表格，并实时生成‘库存统计’分析")
+    st.markdown(
+        """
+        <div style="display:flex; flex-direction:column; justify-content:center; height:100%;">
+            <h1 style="margin-bottom:0;">Gangnam 库存管理</h1>
+            <p style="color:gray; font-size:16px; margin-top:4px;">
+                录入‘买入/剩余’，自动保存到表格，并实时生成‘库存统计’分析
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
 
