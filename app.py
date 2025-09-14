@@ -136,40 +136,43 @@ with tabs[0]:
     )
 
     if st.button("✅ 批量保存到『购入/剩余』"):
-        rows = edited.copy()
-        rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
-        rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
-        if rows.empty:
-            st.warning("请至少填写一个物品的‘物品名’和‘数量’")
-            st.stop()
+    rows = edited.copy()
+    rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
+    rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
+    if rows.empty:
+        st.warning("请至少填写一个物品的‘物品名’和‘数量’")
+        st.stop()
 
-        ok, fail = 0, 0
-        for _, r in rows.iterrows():
-            qty   = float(r["数量"])
-            unit  = str(r.get("单位", "") or "").strip()
-            price = None
-            total = None
-            if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
-                price = float(r["单价"])
-                total = qty * price
+    # === 组装 records 列表（一次批量写入） ===
+    records = []
+    for _, r in rows.iterrows():
+        qty   = float(r["数量"])
+        unit  = str(r.get("单位", "") or "").strip()
+        price = None
+        total = None
+        if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
+            price = float(r["单价"])
+            total = qty * price
 
-            record = {
-                "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
-                "食材名称 (Item Name)": str(r["物品名"]).strip(),
-                "分类 (Category)": sel_type,
-                "数量 (Qty)": qty,
-                "单位 (Unit)": unit,
-                "单价 (Unit Price)": price if sel_status == "买入" else "",
-                "总价 (Total Cost)": total if sel_status == "买入" else "",
-                "状态 (Status)": sel_status,
-                "备注 (Notes)": str(r.get("备注", "")).strip(),
-            }
-            try:
-                append_record(record)
-                ok += 1
-            except Exception as e:
-                fail += 1
-                st.error(f"保存失败：{e}")
+        records.append({
+            "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
+            "食材名称 (Item Name)": str(r["物品名"]).strip(),
+            "分类 (Category)": sel_type,
+            "数量 (Qty)": qty,
+            "单位 (Unit)": unit,
+            "单价 (Unit Price)": price if sel_status == "买入" else "",
+            "总价 (Total Cost)": total if sel_status == "买入" else "",
+            "状态 (Status)": sel_status,
+            "备注 (Notes)": str(r.get("备注", "")).strip(),
+        })
+
+    try:
+        # 一次调用，显著减少写请求次数
+        from gsheet import append_records_bulk
+        append_records_bulk(records)
+        st.success(f"已成功写入 {len(records)} 条记录！")
+    except Exception as e:
+        st.error(f"保存失败：{e}")
 
         if ok and not fail:
             st.success(f"已成功写入 {ok} 条记录！")
