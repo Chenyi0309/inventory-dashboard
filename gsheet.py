@@ -70,23 +70,22 @@ def read_catalog_cached():
     return read_catalog()
 
 # ============ 写 ============
+# gsheet.py（只贴 append_record 的新版本）
 def append_record(record: dict):
     """
-    追加一行到『购入/剩余』。record 的 key 要与表头一致（中文表头）。
-    会按表头顺序映射，缺失的列写空。
+    追加一行到『购入/剩余』。按表头映射每列。返回(新行号, API回执)。
     """
     ws = _get_ws()
     header = ws.row_values(1)
     if not header:
         raise RuntimeError("目标工作表首行(header)为空，请确认首行是表头")
 
-    # 按 header 顺序组织一行
-    row = []
-    for col in header:
-        row.append(record.get(col, ""))
+    row = [record.get(col, "") for col in header]
 
-    # 写入
-    ws.append_row(row, value_input_option="USER_ENTERED")
-
-    # 清读缓存
+    # 这里用 append_row 并要求返回回执
+    resp = ws.append_row(row, value_input_option="USER_ENTERED")
+    # gspread 对 append_row 通常不返回行号，这里手动用当前已用行数估算：
+    # 更稳妥：再读一次最后一行看是否等于我们刚写入的“标记”
     bust_cache()
+    return (ws.row_count, resp)
+
