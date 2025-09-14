@@ -187,6 +187,12 @@ with tabs[0]:
         except Exception as e:
             st.error(f"保存失败：{e}")
 
+from gsheet import debug_list_sheets, debug_service_email, try_write_probe
+with st.expander("🔧 写入自检", expanded=False):
+    st.caption(f"使用的服务账号：{debug_service_email()}")
+    st.caption(f"目标文件的工作表：{', '.join(debug_list_sheets())}")
+    if st.button("试写一条 probe 并删除"):
+        st.write("结果：", try_write_probe())
 
 # ================== 库存统计 ==================
 with tabs[1]:
