@@ -134,7 +134,7 @@ with tabs[0]:
         },
         key="bulk_editor",
     )
-        if st.button("✅ 批量保存到『购入/剩余』"):
+    if st.button("✅ 批量保存到『购入/剩余』"):
         # 1) 取出可编辑表格的内容
         rows = edited.copy()
         rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
