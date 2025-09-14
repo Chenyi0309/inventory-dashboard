@@ -172,7 +172,7 @@ with tabs[1]:
         except: pass
         st.rerun()
 
-    # 读明细并统一列名 —— 使用 compute 的规范化，避免“未识别列”
+    # 读明细并统一列名 —— 使用 compute 的规范化
     try:
         df = read_records_fn()
         df = normalize_columns_compute(df)
@@ -180,7 +180,7 @@ with tabs[1]:
         st.error(f"读取表格失败：{e}")
         st.stop()
 
-    # 调试面板：看看实际读到了什么
+    # 调试面板
     with st.expander("🔎 调试：查看原始数据快照", expanded=False):
         st.write("shape:", df.shape)
         st.write("columns:", list(df.columns))
@@ -198,10 +198,10 @@ with tabs[1]:
     else:
         df["分类 (Category)"] = df["分类 (Category)"].apply(normalize_cat)
 
-    # 计算总体统计
+    # 统计
     stats_all = compute_stats(df)
 
-    # 每个 item 的“最近分类”（用于筛选）
+    # “类型”列用于筛选
     if not df.empty and "食材名称 (Item Name)" in df.columns:
         latest_cat = (
             df.sort_values("日期 (Date)")
@@ -214,16 +214,14 @@ with tabs[1]:
         stats_all["类型"] = DEFAULT_CAT
     stats_all["类型"] = stats_all["类型"].apply(normalize_cat)
 
-    # === 新增：分类筛选条（作用于下方结果表） ===
+    # === 筛选条（作用于下方结果表） ===
     st.markdown("#### 筛选")
     fc1, _ = st.columns([1, 3])
     sel_type_bar = fc1.selectbox("选择分类", ["全部"] + ALLOWED_CATS, index=0)
-
     if sel_type_bar == "全部":
         stats = stats_all.copy()
     else:
         stats = stats_all[stats_all["类型"].eq(sel_type_bar)].copy()
-    # ============================================
 
     # 预警：普通<5；百分比/糖浆<20%
     def _is_percent_row(row: pd.Series) -> bool:
@@ -255,18 +253,10 @@ with tabs[1]:
     else:
         stats["库存预警"] = ""
 
-    # KPI
-    c1, c2, c3, c4 = st.columns(4)
+    # 仅保留一个 KPI：记录食材数（删除其余三块）
+    c1, = st.columns(1)
     total_items = int(stats["食材名称 (Item Name)"].nunique()) if not stats.empty and "食材名称 (Item Name)" in stats.columns else 0
-    total_spend = df.loc[df.get("状态 (Status)") == "买入", "总价 (Total Cost)"].sum(min_count=1) if "总价 (Total Cost)" in df.columns else 0
-    low_days = pd.to_numeric(stats.get("预计还能用天数"), errors="coerce") if "预计还能用天数" in stats.columns else pd.Series(dtype=float)
-    need_buy = int((low_days <= 7).sum()) if not stats.empty else 0
-    recent_usage_count = int((pd.to_numeric(stats.get("平均最近两周使用量"), errors="coerce") > 0).sum()) if not stats.empty else 0
-
     c1.metric("记录食材数", value=total_items)
-    c2.metric("累计支出", value=f"{(total_spend or 0):.2f}")
-    c3.metric("≤7天即将耗尽(参考)", value=need_buy)
-    c4.metric("最近14天可估使用记录数", value=recent_usage_count)
 
     # 结果表
     display_cols = [
@@ -301,14 +291,30 @@ with tabs[1]:
     picked = st.selectbox("选择一个物品查看详情", detail_items, index=0)
 
     if picked and picked != "（不选）":
+        # 统一口径的“当前库存” = 最后一次剩余 + 之后买入
         item_df = normalize_columns_compute(df[df["食材名称 (Item Name)"] == picked].copy())
-        item_df = item_df.sort_values("日期 (Date)")
+        item_df = item_df.reset_index(drop=False).rename(columns={"index": "__orig_idx__"})
+        if "row_order" not in item_df.columns:
+            item_df["row_order"] = item_df["__orig_idx__"]
+        item_df = item_df.sort_values(["日期 (Date)", "row_order"])
 
         rem = item_df[item_df.get("状态 (Status)") == "剩余"].copy()
-        latest_rem = rem.iloc[-1] if len(rem) else None
-        cur_stock = float(latest_rem["数量 (Qty)"]) if latest_rem is not None else np.nan
-
         buy = item_df[item_df.get("状态 (Status)") == "买入"].copy()
+
+        if len(rem):
+            last_rem = rem.iloc[-1]
+            last_date = last_rem["日期 (Date)"]
+            last_ord  = last_rem["row_order"]
+            last_qty  = float(last_rem["数量 (Qty)"]) if pd.notna(last_rem["数量 (Qty)"]) else 0.0
+            mask_after = (
+                (item_df["日期 (Date)"] > last_date) |
+                ((item_df["日期 (Date)"] == last_date) & (item_df["row_order"] > last_ord))
+            )
+            buys_after = item_df[mask_after & (item_df["状态 (Status)"] == "买入")]
+            cur_stock = float(last_qty + buys_after["数量 (Qty)"].sum())
+        else:
+            cur_stock = float(buy["数量 (Qty)"].sum()) if len(buy) else float("nan")
+
         last_buy = buy.iloc[-1] if len(buy) else None
         last_buy_date = (last_buy["日期 (Date)"].date().isoformat()
                          if last_buy is not None and pd.notna(last_buy["日期 (Date)"]) else "—")
@@ -358,6 +364,7 @@ with tabs[1]:
             st.altair_chart(chart_ev, use_container_width=True)
 
         # 最近记录（原始）
+        st.markdown(" ")
         st.markdown("#### 最近记录（原始）")
         cols = ["日期 (Date)","状态 (Status)","数量 (Qty)","单位 (Unit)","单价 (Unit Price)","总价 (Total Cost)","分类 (Category)","备注 (Notes)"]
         cols = [c for c in cols if c in item_df.columns]
