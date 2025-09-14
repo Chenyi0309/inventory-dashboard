@@ -342,34 +342,10 @@ def append_records_bulk(records: List[Dict]) -> dict:
     bust_cache()
     return resp
 
-
 # ======== 诊断写入（不影响统计） ========
+# 安全空实现：不再写表，只返回 True
 def try_write_probe() -> bool:
-    """
-    诊断用的小写入（写一条“__probe__”，立即删除）。
-    """
-    ws = _get_ws()
-    header = _header_cached()
-    # 构造与表头等长的行，第一列放一个标记便于在表里辨识
-    row = [["__probe__"] + [""] * (len(header) - 1)]
-
-    _retry(lambda: ws.append_rows(
-        row,
-        value_input_option="USER_ENTERED",
-        table_range="A1",
-        include_values_in_response=False
-    ))
-    bust_cache()
-
-    # 尝试删除最后一行（若 row_count 与已用行不一致，删除失败也没关系）
-    try:
-        _retry(lambda: ws.delete_rows(ws.row_count))
-    except Exception:
-        pass
-
-    bust_cache()
     return True
-
 
 # ======== 调试辅助：解析写回区间 & 表尾快照 ========
 def parse_updated_range_rows(resp: dict) -> Optional[Tuple[int, int]]:
