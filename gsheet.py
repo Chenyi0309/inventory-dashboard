@@ -5,6 +5,7 @@ import json
 import time
 import random
 from functools import lru_cache
+from typing import Any, Optional
 from typing import List, Dict, Tuple, Any
 
 import gspread
@@ -198,10 +199,6 @@ def _norm_cell(v: Any) -> Any:
 
 # ======== 写入：单行 & 批量 ========
 def append_record(record: Dict[str, Any]) -> Tuple[int, dict]:
-    """
-    追加一行到『购入/剩余』。返回 (估算行号, gspread响应对象)。
-    关键：USER_ENTERED + INSERT_ROWS + table_range="A1"，确保不会“写到很后面”。
-    """
     ws = _get_ws()
     header = _header_cached()
     row = [_norm_cell(record.get(col, "")) for col in header]
@@ -211,6 +208,7 @@ def append_record(record: Dict[str, Any]) -> Tuple[int, dict]:
         value_input_option="USER_ENTERED",
         insert_data_option="INSERT_ROWS",
         table_range="A1",
+        include_values_in_response=True,   # <<< 新增
     ))
 
     bust_cache()
@@ -218,9 +216,6 @@ def append_record(record: Dict[str, Any]) -> Tuple[int, dict]:
 
 
 def append_records_bulk(records: List[Dict[str, Any]]) -> dict:
-    """
-    批量追加多行（显著降低写请求数）。
-    """
     if not records:
         return {}
 
@@ -233,11 +228,48 @@ def append_records_bulk(records: List[Dict[str, Any]]) -> dict:
         value_input_option="USER_ENTERED",
         insert_data_option="INSERT_ROWS",
         table_range="A1",
+        include_values_in_response=True,   # <<< 新增
     ))
 
     bust_cache()
     return resp
 
+# 追加一个工具：把 API 返回的 A1 区间解析出起止行号
+def parse_updated_range_rows(resp: dict) -> Optional[Tuple[int, int]]:
+    try:
+        a1 = resp.get("updates", {}).get("updatedRange", "")  # 例如 "购入/剩余!A249:I250"
+        if "!" in a1:
+            _, rng = a1.split("!", 1)
+        else:
+            rng = a1
+        start, end = rng.split(":")
+        import re
+        s = int(re.findall(r"\d+", start)[0])
+        e = int(re.findall(r"\d+", end)[0])
+        return s, e
+    except Exception:
+        return None
+
+
+# 再加一个 tail 调试：返回末尾若干行（含行号）
+def tail_rows(n: int = 10) -> pd.DataFrame:
+    ws = _get_ws()
+    vals = ws.get_all_values()
+    if not vals:
+        return pd.DataFrame()
+    header = vals[0]
+    body = vals[1:]
+    # 去掉尾部全空
+    while body and all(c == "" for c in body[-1]):
+        body.pop()
+    if not body:
+        return pd.DataFrame(columns=["__row__"] + header)
+    # 末尾 n 行（加上真实行号）
+    start_row = max(2, len(body) - n + 2)  # 首行是1，数据从第2行开始
+    chunk = body[-n:]
+    out = pd.DataFrame(chunk, columns=header)
+    out.insert(0, "__row__", range(start_row, start_row + len(out)))
+    return out
 
 # ======== 诊断写入（不影响统计） ========
 def try_write_probe() -> bool:
@@ -264,3 +296,5 @@ def try_write_probe() -> bool:
 
     bust_cache()
     return True
+
+
