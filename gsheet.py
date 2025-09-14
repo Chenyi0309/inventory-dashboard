@@ -50,7 +50,6 @@ def _debug_read_header():
 
 # ============ 读 ============
 @lru_cache(maxsize=1)
-@st.cache_data(ttl=60)
 def read_records_cached():
     return read_records()
 
@@ -63,7 +62,6 @@ def read_records():
     df = pd.DataFrame(data)
     return df
     
-@st.cache_data(ttl=300)
 def read_catalog():
     # 如果你有“库存产品”主数据工作表，可以类似读；这里保持占位
     return pd.DataFrame()
