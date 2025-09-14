@@ -1,115 +1,92 @@
-# -*- coding: utf-8 -*-
-"""Google Sheets helpers: 读取/写入『购入/剩余』，可选读取主数据表。"""
-from __future__ import annotations
-
+# gsheet.py
 import os
-from typing import Dict, List
-import pandas as pd
+import json
 import gspread
 from google.oauth2.service_account import Credentials
+import pandas as pd
+from functools import lru_cache
 
-try:
-    import streamlit as st
-    _HAS_ST = True
-except Exception:
-    _HAS_ST = False
-
-SHEET_URL = os.getenv("INVENTORY_SHEET_URL", "").strip()
-WS_RECORDS = os.getenv("INVENTORY_WORKSHEET_NAME", "购入/剩余")  # 明细表
-WS_CATALOG = os.getenv("INVENTORY_CATALOG_NAME", "库存产品")       # 主数据(可无)
+SHEET_URL_ENV = "INVENTORY_SHEET_URL"
+TARGET_WS_TITLE = "购入/剩余"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive"
 ]
 
+def _get_creds():
+    # service_account.json 由 app.py 启动时从 secrets 写出
+    with open("service_account.json", "r") as f:
+        data = json.load(f)
+    return Credentials.from_service_account_info(data, scopes=SCOPES)
+
 def _get_client():
-    if os.path.exists("service_account.json"):
-        creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
-    else:
-        sa_json = os.getenv("SERVICE_ACCOUNT_JSON", "").strip()
-        if not sa_json:
-            raise RuntimeError("缺少 Google Service Account 凭证（service_account.json 或 SERVICE_ACCOUNT_JSON）。")
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
-            f.write(sa_json.encode("utf-8"))
-            path = f.name
-        creds = Credentials.from_service_account_file(path, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return gspread.authorize(_get_creds())
 
 def _open_sheet():
-    if not SHEET_URL:
-        raise RuntimeError("ENV INVENTORY_SHEET_URL 未设置。")
+    url = os.getenv(SHEET_URL_ENV) or os.environ.get(SHEET_URL_ENV)  # 兼容
+    if not url:
+        raise RuntimeError(f"{SHEET_URL_ENV} 未配置")
     gc = _get_client()
-    sh = gc.open_by_url(SHEET_URL)
-    return sh
+    return gc.open_by_url(url)
 
-def read_records() -> pd.DataFrame:
+def _get_ws():
     sh = _open_sheet()
-    ws = sh.worksheet(WS_RECORDS)
-    data = ws.get_all_records()
-    if not data:
-        return pd.DataFrame()
+    try:
+        ws = sh.worksheet(TARGET_WS_TITLE)
+    except gspread.WorksheetNotFound:
+        raise RuntimeError(f"找不到工作表『{TARGET_WS_TITLE}』，请在该文件中创建一个同名工作表（tab）")
+    return ws
+
+# ============ 自检辅助 ============
+def _debug_list_sheets():
+    sh = _open_sheet()
+    return [ws.title for ws in sh.worksheets()]
+
+def _debug_read_header():
+    ws = _get_ws()
+    header = ws.row_values(1)
+    return header
+
+# ============ 读 ============
+@lru_cache(maxsize=1)
+def read_records_cached():
+    return read_records()
+
+def bust_cache():
+    read_records_cached.cache_clear()
+
+def read_records():
+    ws = _get_ws()
+    data = ws.get_all_records()  # 以首行作为header
     df = pd.DataFrame(data)
-    # 基本清洗：保留常用列名（其余归一化交给 app/compute）
-    if "日期 (Date)" in df.columns:
-        df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
-    for col in ["数量 (Qty)", "单价 (Unit Price)", "总价 (Total Cost)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "食材名称 (Item Name)" in df.columns:
-        df["食材名称 (Item Name)"] = df["食材名称 (Item Name)"].astype(str).str.strip()
-        df = df[df["食材名称 (Item Name)"] != ""]
-    for c in ["分类 (Category)","状态 (Status)","单位 (Unit)"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
     return df
 
-def read_catalog() -> pd.DataFrame:
-    try:
-        sh = _open_sheet()
-        ws = sh.worksheet(WS_CATALOG)
-        data = ws.get_all_records()
-        if not data:
-            return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df = df.rename(columns={
-            "物品名": "物品名", "单位": "单位",
-            "类型": "类型", "类别": "类型", "分类": "类型",
-        })
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["物品名", "单位", "类型"])
+def read_catalog():
+    # 如果你有“库存产品”主数据工作表，可以类似读；这里保持占位
+    return pd.DataFrame()
 
-def append_record(record: Dict[str, object]) -> None:
-    sh = _open_sheet()
-    ws = sh.worksheet(WS_RECORDS)
-    headers: List[str] = ws.row_values(1)
-    if not headers:
-        headers = ["日期 (Date)", "食材名称 (Item Name)", "分类 (Category)", "数量 (Qty)",
-                   "单位 (Unit)", "单价 (Unit Price)", "总价 (Total Cost)",
-                   "状态 (Status)", "备注 (Notes)"]
-        ws.append_row(headers, value_input_option="RAW")
+def read_catalog_cached():
+    return read_catalog()
+
+# ============ 写 ============
+def append_record(record: dict):
+    """
+    追加一行到『购入/剩余』。record 的 key 要与表头一致（中文表头）。
+    会按表头顺序映射，缺失的列写空。
+    """
+    ws = _get_ws()
+    header = ws.row_values(1)
+    if not header:
+        raise RuntimeError("目标工作表首行(header)为空，请确认首行是表头")
+
+    # 按 header 顺序组织一行
     row = []
-    for h in headers:
-        v = record.get(h, "")
-        if isinstance(v, (float, int)) and pd.notna(v):
-            row.append(v)
-        else:
-            row.append("" if v is None else str(v))
+    for col in header:
+        row.append(record.get(col, ""))
+
+    # 写入
     ws.append_row(row, value_input_option="USER_ENTERED")
 
-if _HAS_ST:
-    @st.cache_data(show_spinner=False, ttl=60)
-    def read_records_cached() -> pd.DataFrame:
-        return read_records()
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def read_catalog_cached() -> pd.DataFrame:
-        return read_catalog()
-
-    def bust_cache():
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
+    # 清读缓存
+    bust_cache()
