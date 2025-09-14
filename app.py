@@ -134,45 +134,49 @@ with tabs[0]:
         },
         key="bulk_editor",
     )
-
-    if st.button("✅ 批量保存到『购入/剩余』"):
+        if st.button("✅ 批量保存到『购入/剩余』"):
+        # 1) 取出可编辑表格的内容
         rows = edited.copy()
         rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
         rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
-    if rows.empty:
-        st.warning("请至少填写一个物品的‘物品名’和‘数量’")
-        st.stop()
+        if rows.empty:
+            st.warning("请至少填写一个物品的‘物品名’和‘数量’")
+            st.stop()
 
-    # === 组装 records 列表（一次批量写入） ===
-    records = []
-    for _, r in rows.iterrows():
-        qty   = float(r["数量"])
-        unit  = str(r.get("单位", "") or "").strip()
-        price = None
-        total = None
-        if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
-            price = float(r["单价"])
-            total = qty * price
+        # 2) 组装成要写入表格的 dict 列表（批量写）
+        payload = []
+        for _, r in rows.iterrows():
+            qty   = float(r["数量"])
+            unit  = str(r.get("单位", "") or "").strip()
+            price = None
+            total = None
+            if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
+                price = float(r["单价"])
+                total = qty * price
 
-        records.append({
-            "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
-            "食材名称 (Item Name)": str(r["物品名"]).strip(),
-            "分类 (Category)": sel_type,
-            "数量 (Qty)": qty,
-            "单位 (Unit)": unit,
-            "单价 (Unit Price)": price if sel_status == "买入" else "",
-            "总价 (Total Cost)": total if sel_status == "买入" else "",
-            "状态 (Status)": sel_status,
-            "备注 (Notes)": str(r.get("备注", "")).strip(),
-        })
+            record = {
+                "日期 (Date)": pd.to_datetime(sel_date).strftime("%Y-%m-%d"),
+                "食材名称 (Item Name)": str(r["物品名"]).strip(),
+                "分类 (Category)": sel_type,
+                "数量 (Qty)": qty,
+                "单位 (Unit)": unit,
+                "单价 (Unit Price)": price if sel_status == "买入" else "",
+                "总价 (Total Cost)": total if sel_status == "买入" else "",
+                "状态 (Status)": sel_status,
+                "备注 (Notes)": str(r.get("备注", "")).strip(),
+            }
+            payload.append(record)
 
-    try:
-        # 一次调用，显著减少写请求次数
-        from gsheet import append_records_bulk
-        append_records_bulk(records)
-        st.success(f"已成功写入 {len(records)} 条记录！")
-    except Exception as e:
-        st.error(f"保存失败：{e}")
+        # 3) 批量写入（带指数退避重试）
+        try:
+            if payload:
+                append_records_bulk(payload)
+                st.success(f"已成功写入 {len(payload)} 条记录！")
+            else:
+                st.info("没有可写入的记录。")
+        except Exception as e:
+            st.error(f"保存失败：{e}")
+
 
         if ok and not fail:
             st.success(f"已成功写入 {ok} 条记录！")
