@@ -203,50 +203,64 @@ with tabs[0]:
             preview.append(row_preview)
 
         # 3) 批量写入 + 显示写入明细 + 回读校验
+try:
+    if payload:
+        # ⬇️ 接住返回值 resp
+        resp = append_records_bulk(payload)  # gsheet 内部已用 USER_ENTERED + INSERT_ROWS + table_range="A1"
+        st.success(f"已成功写入 {len(payload)} 条记录！")
+        st.caption(f"目标表：{st.secrets.get('INVENTORY_SHEET_URL') or os.getenv('INVENTORY_SHEET_URL')}")
+
+        # ⬇️ 显示 Google 返回的写入区间（用于定位到底写到哪一段）
+        from gsheet import parse_updated_range_rows, tail_rows
+        rng = resp.get("updates", {}).get("updatedRange", "")
+        st.caption(f"Google 返回写入区间：{rng}")
+        rows_info = parse_updated_range_rows(resp)
+        if rows_info:
+            st.caption(f"（起止行号：{rows_info[0]}–{rows_info[1]}）")
+
+        # ⬇️ 追加一份表尾快照，直接看看末尾原始数据（含行号）
+        with st.expander("🔎 表尾快照（最近 10 行）", expanded=False):
+            st.dataframe(tail_rows(10), use_container_width=True)
+
+        # —— 原有“本次写入的记录”预览 ——
+        pre_df = pd.DataFrame(preview)
+        if sel_status == "买入":
+            pre_df = pre_df[["日期", "物品名", "数量", "单位", "单价", "总价", "状态"]]
+            with pd.option_context("mode.use_inf_as_na", True):
+                total_spent = pd.to_numeric(pre_df.get("总价"), errors="coerce").sum()
+            st.caption(f"本次买入合计金额：{total_spent:.2f}")
+        else:
+            pre_df = pre_df[["日期", "物品名", "数量", "单位", "状态"]]
+        st.markdown("**本次写入的记录**")
+        st.dataframe(pre_df, use_container_width=True)
+
+        # —— 回读校验（保持原逻辑） ——
         try:
-            if payload:
-                append_records_bulk(payload)  # 需在 gsheet 内部用 USER_ENTERED + table_range="A1"
-                st.success(f"已成功写入 {len(payload)} 条记录！")
-                st.caption(f"目标表：{st.secrets.get('INVENTORY_SHEET_URL') or os.getenv('INVENTORY_SHEET_URL')}")
-
-                pre_df = pd.DataFrame(preview)
-                if sel_status == "买入":
-                    pre_df = pre_df[["日期", "物品名", "数量", "单位", "单价", "总价", "状态"]]
-                    with pd.option_context("mode.use_inf_as_na", True):
-                        total_spent = pd.to_numeric(pre_df.get("总价"), errors="coerce").sum()
-                    st.caption(f"本次买入合计金额：{total_spent:.2f}")
-                else:
-                    pre_df = pre_df[["日期", "物品名", "数量", "单位", "状态"]]
-                st.markdown("**本次写入的记录**")
-                st.dataframe(pre_df, use_container_width=True)
-
-                # —— 回读校验：马上从表里把刚写的行读回来 —— 
-                try:
-                    bust_cache()
-                except Exception:
-                    pass
-                try:
-                    df_check = read_records_fn()
-                    df_check = normalize_columns_compute(df_check)
-                    dd = pd.to_datetime(df_check.get("日期 (Date)"), errors="coerce").dt.date
-                    names = [p["物品名"] for p in preview]
-                    just_now = df_check[
-                        (dd == dt.date()) &
-                        (df_check.get("状态 (Status)") == sel_status) &
-                        (df_check.get("食材名称 (Item Name)").isin(names))
-                    ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
-                    st.markdown("**写入后的回读校验**")
-                    if just_now.empty:
-                        st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白区域影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
-                    else:
-                        st.dataframe(just_now.sort_values("日期 (Date)"), use_container_width=True)
-                except Exception:
-                    pass
-
+            bust_cache()
+        except Exception:
+            pass
+        try:
+            df_check = read_records_fn()
+            df_check = normalize_columns_compute(df_check)
+            dd = pd.to_datetime(df_check.get("日期 (Date)"), errors="coerce").dt.date
+            names = [p["物品名"] for p in preview]
+            just_now = df_check[
+                (dd == dt.date()) &
+                (df_check.get("状态 (Status)") == sel_status) &
+                (df_check.get("食材名称 (Item Name)").isin(names))
+            ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
+            st.markdown("**写入后的回读校验**")
+            if just_now.empty:
+                st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白区域影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
             else:
-                st.info("没有可写入的记录。")
-        except Exception as e:
-            st.error(f"保存失败：{e}")
+                st.dataframe(just_now.sort_values("日期 (Date)"), use_container_width=True)
+        except Exception:
+            pass
+
+    else:
+        st.info("没有可写入的记录。")
+except Exception as e:
+    st.error(f"保存失败：{e}")
 
 
 from gsheet import debug_list_sheets, debug_service_email, try_write_probe
