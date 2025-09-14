@@ -110,7 +110,11 @@ with tabs[0]:
 
     # 构造可编辑表：优先主数据，否则历史记录中该类的最近单位
     if not catalog.empty and {"物品名", "单位", "类型"}.issubset(catalog.columns):
-        base = catalog[catalog["类型"] == sel_type][["物品名", "单位"]].drop_duplicates().reset_index(drop=True)
+        catalog = catalog.copy()
+        catalog["类型"] = catalog["类型"].apply(normalize_cat)  # ← 新增规范化
+        base = (catalog[catalog["类型"] == sel_type][["物品名", "单位"]]
+                .drop_duplicates()
+                .reset_index(drop=True))
     else:
         if not df_all.empty:
             tmp = df_all.copy()
