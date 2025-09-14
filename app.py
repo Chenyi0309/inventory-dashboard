@@ -53,6 +53,14 @@ def normalize_cat(x: str) -> str:
         return DEFAULT_CAT
     return s if s in ALLOWED_CATS else DEFAULT_CAT
 
+def _blank_if_none(x):
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+    except Exception:
+        pass
+    return x
+
 
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
@@ -60,7 +68,6 @@ st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
 # 顶部布局：左边 logo，右边标题说明
 c1, c2 = st.columns([1, 6])
 with c1:
-    # 确保仓库里有 gangnam_logo.png；你也可以把宽度调大/调小
     st.image("gangnam_logo.png", width=180)
 
 with c2:
@@ -165,19 +172,21 @@ with tabs[0]:
             total = None
             if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
                 price = float(r["单价"])
-                total = qty * price
+                total = round(qty * price, 2)
 
             record = {
-                "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",
+                "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",   # 强制日期型
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
                 "分类 (Category)": sel_type,
                 "数量 (Qty)": qty,
                 "单位 (Unit)": unit,
-                "单价 (Unit Price)": price if sel_status == "买入" else "",
-                "总价 (Total Cost)": total if sel_status == "买入" else "",
+                "单价 (Unit Price)": _blank_if_none(price) if sel_status == "买入" else "",
+                "总价 (Total Cost)": _blank_if_none(total) if sel_status == "买入" else "",
                 "状态 (Status)": sel_status,
                 "备注 (Notes)": str(r.get("备注", "")).strip(),
             }
+            # 彻底清洗 None/NaN -> ""，防止追加函数丢行
+            record = {k: _blank_if_none(v) for k, v in record.items()}
             payload.append(record)
 
             # 预览用的精简行
@@ -189,30 +198,50 @@ with tabs[0]:
                 "状态": sel_status,
             }
             if sel_status == "买入":
-                row_preview["单价"] = price if price is not None else ""
-                row_preview["总价"] = total if total is not None else ""
+                row_preview["单价"] = "" if price is None else price
+                row_preview["总价"] = "" if total is None else total
             preview.append(row_preview)
 
-        # 3) 批量写入 + 显示写入明细
+        # 3) 批量写入 + 显示写入明细 + 回读校验
         try:
             if payload:
-                append_records_bulk(payload)
+                append_records_bulk(payload)  # 需在 gsheet 内部用 USER_ENTERED + table_range="A1"
                 st.success(f"已成功写入 {len(payload)} 条记录！")
+                st.caption(f"目标表：{st.secrets.get('INVENTORY_SHEET_URL') or os.getenv('INVENTORY_SHEET_URL')}")
 
-                import pandas as pd
                 pre_df = pd.DataFrame(preview)
-                # 更友好的列顺序
                 if sel_status == "买入":
                     pre_df = pre_df[["日期", "物品名", "数量", "单位", "单价", "总价", "状态"]]
-                    # 小计
                     with pd.option_context("mode.use_inf_as_na", True):
                         total_spent = pd.to_numeric(pre_df.get("总价"), errors="coerce").sum()
                     st.caption(f"本次买入合计金额：{total_spent:.2f}")
                 else:
                     pre_df = pre_df[["日期", "物品名", "数量", "单位", "状态"]]
-
                 st.markdown("**本次写入的记录**")
                 st.dataframe(pre_df, use_container_width=True)
+
+                # —— 回读校验：马上从表里把刚写的行读回来 —— 
+                try:
+                    bust_cache()
+                except Exception:
+                    pass
+                try:
+                    df_check = read_records_fn()
+                    df_check = normalize_columns_compute(df_check)
+                    dd = pd.to_datetime(df_check.get("日期 (Date)"), errors="coerce").dt.date
+                    names = [p["物品名"] for p in preview]
+                    just_now = df_check[
+                        (dd == dt.date()) &
+                        (df_check.get("状态 (Status)") == sel_status) &
+                        (df_check.get("食材名称 (Item Name)").isin(names))
+                    ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
+                    st.markdown("**写入后的回读校验**")
+                    if just_now.empty:
+                        st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白区域影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
+                    else:
+                        st.dataframe(just_now.sort_values("日期 (Date)"), use_container_width=True)
+                except Exception:
+                    pass
 
             else:
                 st.info("没有可写入的记录。")
