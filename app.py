@@ -48,42 +48,37 @@ ALIASES = {
 
 def _fix_col_token(s: str) -> str:
     s = (s or "")
-    # 常见不可见字符 & 全角括号/空格
-    s = s.replace("\u3000", " ")         # 全角空格
+    s = s.replace("\u3000", " ")
     s = s.replace("（", "(").replace("）", ")")
-    s = s.replace("\u00A0", " ")         # 不换行空格
-    s = s.replace("\u200B", "")          # 零宽空白
-    # 把括号里的空格收紧："(  Date  )" → "(Date)"
+    s = s.replace("\u00A0", " ")
+    s = s.replace("\u200B", "")
     s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
-    # 去掉 CJK 与括号之间多余空格："日期  (Date)" → "日期 (Date)"
     s = re.sub(r"([\u4e00-\u9fffA-Za-z0-9])\s+\(", r"\1 (", s)
     s = re.sub(r"\)\s+([\u4e00-\u9fffA-Za-z0-9])", r") \1", s)
-    # 压缩其余连续空白
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    统一把表头规范化，直接复用 compute.py 中的实现，
-    解决尾部空格/全角括号/大小写/别名等导致的“未识别列”问题。
-    """
-    try:
-        from compute import normalize_columns as _canon
-        return _canon(df)
-    except Exception:
-        # 如果 compute.normalize_columns 不可用，兜底做基本修复（去空格、全角）
-        if df is None or df.empty:
-            return df
-        fixed = {}
-        for c in df.columns:
-            s = (c or "")
-            s = s.replace("\u3000", " ").replace("（", "(").replace("）", ")").replace("\u00A0", " ").replace("\u200B", "")
-            s = re.sub(r"\(\s*([^)]+?)\s*\)", r"(\1)", s)
-            s = re.sub(r"\s+", " ", s).strip()
-            fixed[c] = s
-        df = df.rename(columns=fixed)
+    if df is None or df.empty:
         return df
+    fixed = {_fix_col_token(c): c for c in df.columns}  # 你原来的实现；已稳定
+    df = df.rename(columns=fixed)
+    lower_map = {c.lower(): c for c in df.columns}
+    mapping = {}
+    for std, alts in ALIASES.items():
+        for a in alts:
+            a_fixed = _fix_col_token(a)
+            if a_fixed in df.columns:
+                mapping[a_fixed] = std; break
+            if a_fixed.lower() in lower_map:
+                mapping[lower_map[a_fixed.lower()]] = std; break
+    df = df.rename(columns=mapping)
+    if "日期 (Date)" in df.columns:
+        df["日期 (Date)"] = pd.to_datetime(df["日期 (Date)"], errors="coerce")
+    for col in ["数量 (Qty)","单价 (Unit Price)","总价 (Total Cost)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 def safe_sort(df: pd.DataFrame, by: str, ascending=True):
     if df is None or df.empty or by not in df.columns:
@@ -109,14 +104,12 @@ tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
 with tabs[0]:
     st.subheader("录入新记录")
 
-    # 读取“购入/剩余”用于推断已有物品（当没有主数据时）
     try:
         df_all = read_records_fn()
         df_all = normalize_columns(df_all)
     except Exception:
         df_all = pd.DataFrame()
 
-    # 主数据可选
     try:
         catalog = read_catalog_fn()
     except Exception:
@@ -127,7 +120,6 @@ with tabs[0]:
     sel_type   = c2.selectbox("类型（大类）", ALLOWED_CATS, index=0)
     sel_status = c3.selectbox("状态 (Status)", ["买入", "剩余"])
 
-    # 构造可编辑表：优先主数据，否则历史记录中该类的最近单位
     if not catalog.empty and {"物品名","单位","类型"}.issubset(catalog.columns):
         base = catalog[catalog["类型"] == sel_type][["物品名","单位"]].drop_duplicates().reset_index(drop=True)
     else:
@@ -220,7 +212,6 @@ with tabs[1]:
         except: pass
         st.rerun()
 
-    # 读明细并统一列名
     try:
         df = read_records_fn()
         df = normalize_columns(df)
@@ -228,7 +219,6 @@ with tabs[1]:
         st.error(f"读取表格失败：{e}")
         st.stop()
 
-    # 调试面板：看看实际读到了什么
     with st.expander("🔎 调试：查看原始数据快照", expanded=False):
         st.write("shape:", df.shape)
         st.write("columns:", list(df.columns))
@@ -240,74 +230,81 @@ with tabs[1]:
         if not df.empty:
             st.dataframe(df.head(10), use_container_width=True)
 
-    # 兜底分类
     if "分类 (Category)" not in df.columns:
-        df["分类 (Category)"] = "食物类"
+        df["分类 (Category)"] = DEFAULT_CAT
     else:
         df["分类 (Category)"] = df["分类 (Category)"].apply(normalize_cat)
 
-    # 总体统计
     stats_all = compute_stats(df)
 
-    # 每个 item 的“最近分类”（用于筛选）
     if not df.empty and "食材名称 (Item Name)" in df.columns:
         latest_cat = (
             safe_sort(df, "日期 (Date)")
             .groupby("食材名称 (Item Name)")["分类 (Category)"]
-            .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else "食物类")
+            .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else DEFAULT_CAT)
         )
         stats_all = stats_all.merge(latest_cat.rename("类型"),
                                     left_on="食材名称 (Item Name)", right_index=True, how="left")
     else:
-        stats_all["类型"] = "食物类"
+        stats_all["类型"] = DEFAULT_CAT
     stats_all["类型"] = stats_all["类型"].apply(normalize_cat)
 
-    # 控件
-    ctl1, ctl2, ctl3 = st.columns([1.2, 1, 1])
-    sel_type = ctl1.selectbox("选择类别", ["全部"] + ALLOWED_CATS, index=0)
-    warn_days   = ctl2.number_input("关注阈值（天）", min_value=1, max_value=60, value=7, step=1)
-    urgent_days = ctl3.number_input("紧急阈值（天）", min_value=1, max_value=60, value=3, step=1)
+    # 预警：普通<5；百分比/糖浆<20%
+    def _is_percent_row(row: pd.Series) -> bool:
+        name = str(row.get("食材名称 (Item Name)","") or "")
+        unit = str(row.get("单位 (Unit)","") or "").strip()
+        last_rem = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
+        if "糖浆" in name:
+            return True
+        if unit in ["%", "％", "百分比", "percent", "ratio"]:
+            return True
+        if pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.0:
+            return True
+        return False
+
+    def badge_row(row: pd.Series) -> str:
+        if _is_percent_row(row):
+            val = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
+            if pd.notna(val) and float(val) < 0.2:
+                return "🚨 立即下单"
+            return "🟢 正常"
+        else:
+            val = pd.to_numeric(row.get("当前库存"), errors="coerce")
+            if pd.notna(val) and float(val) < 5:
+                return "🚨 立即下单"
+            return "🟢 正常"
 
     stats = stats_all.copy()
-    if sel_type != "全部":
-        stats = stats[stats["类型"].eq(sel_type)]
-
-    # 预警
-    def badge(days):
-        x = pd.to_numeric(days, errors="coerce")
-        if pd.isna(x): return ""
-        if x <= urgent_days: return "🚨 立即下单"
-        if x <= warn_days:   return "🟠 关注"
-        return "🟢 正常"
-    if not stats.empty and "预计还能用天数" in stats.columns:
-        stats["库存预警"] = stats["预计还能用天数"].apply(badge)
+    if not stats.empty:
+        stats["库存预警"] = stats.apply(badge_row, axis=1)
     else:
         stats["库存预警"] = ""
 
-    # KPI
+    # KPI（保持不变）
     c1, c2, c3, c4 = st.columns(4)
     total_items = int(stats["食材名称 (Item Name)"].nunique()) if not stats.empty and "食材名称 (Item Name)" in stats.columns else 0
     total_spend = df.loc[df.get("状态 (Status)") == "买入", "总价 (Total Cost)"].sum(min_count=1) if "总价 (Total Cost)" in df.columns else 0
     low_days = pd.to_numeric(stats.get("预计还能用天数"), errors="coerce") if "预计还能用天数" in stats.columns else pd.Series(dtype=float)
-    need_buy = int((low_days <= warn_days).sum()) if not stats.empty else 0
+    need_buy = int((low_days <= 7).sum()) if not stats.empty else 0  # 只是保留一个参考
     recent_usage_count = int((pd.to_numeric(stats.get("平均最近两周使用量"), errors="coerce") > 0).sum()) if not stats.empty else 0
 
-    c1.metric(f"{sel_type} — 记录食材数" if sel_type!="全部" else "记录食材数", value=total_items)
+    c1.metric("记录食材数", value=total_items)
     c2.metric("累计支出", value=f"{(total_spend or 0):.2f}")
-    c3.metric(f"≤{warn_days}天即将耗尽", value=need_buy)
+    c3.metric("≤7天即将耗尽(参考)", value=need_buy)
     c4.metric("最近14天可估使用记录数", value=recent_usage_count)
 
-    # 结果表
+    # 展示列（新增“单位 (Unit)”，去掉“计算下次采购量”）
     display_cols = [
-        "食材名称 (Item Name)", "当前库存", "平均最近两周使用量",
-        "预计还能用天数", "计算下次采购量",
+        "食材名称 (Item Name)", "当前库存", "单位 (Unit)", "平均最近两周使用量",
+        "预计还能用天数",
         "最近统计剩余日期", "最近采购日期",
         "最近采购数量", "最近采购单价",
         "平均采购间隔(天)", "累计支出", "库存预警"
     ]
     show = stats[[c for c in display_cols if c in stats.columns]].copy()
 
-    severity = {"🚨 立即下单": 0, "🟠 关注": 1, "🟢 正常": 2, "": 3}
+    # 排序：按预警严重&还能用天数
+    severity = {"🚨 立即下单": 0, "🟢 正常": 2, "": 3}
     if "库存预警" in show.columns:
         show["__sev__"] = show["库存预警"].map(severity).fillna(3)
         if "预计还能用天数" in show.columns:
@@ -315,13 +312,13 @@ with tabs[1]:
         show = show.drop(columns="__sev__", errors="ignore")
 
     if show.empty:
-        st.info("该类别下暂无统计结果（可能是【分类 (Category)】为空或未被识别/未读到正确工作表）。请检查『购入/剩余』表中的表头和工作表名。")
+        st.info("暂无统计结果。请检查『购入/剩余』表的表头/数据是否完整。")
     st.dataframe(show, use_container_width=True)
 
     # 导出
     csv = show.to_csv(index=False).encode("utf-8-sig")
     st.download_button("⬇️ 导出统计结果（CSV）", data=csv,
-                       file_name=f"inventory_stats_{sel_type}.csv", mime="text/csv")
+                       file_name=f"inventory_stats.csv", mime="text/csv")
 
     # ============ 下钻：物品详情 ============
     st.markdown("### 🔍 物品详情")
@@ -353,7 +350,6 @@ with tabs[1]:
         else:
             avg_interval = np.nan
 
-        # KPI
         k1, k2, k3, k4, k5, k6 = st.columns(6)
         k1.metric("当前库存", f"{0 if np.isnan(cur_stock) else cur_stock}")
         k2.metric("最近14天用量", f"{0 if not use14 else round(use14,2)}")
@@ -362,7 +358,6 @@ with tabs[1]:
         k5.metric("最近采购日期", last_buy_date)
         k6.metric("平均采购间隔(天)", "—" if np.isnan(avg_interval) else f"{avg_interval:.1f}")
 
-        # 库存轨迹（近60天）
         lookback = pd.Timestamp.today().normalize() - pd.Timedelta(days=60)
         rem60 = rem[rem["日期 (Date)"] >= lookback].copy()
         if not rem60.empty:
@@ -373,7 +368,6 @@ with tabs[1]:
             ).properties(title=f"{picked} — 剩余数量（近60天）")
             st.altair_chart(chart_stock, use_container_width=True)
 
-        # 事件时间线（近60天）
         ev = item_df[item_df["日期 (Date)"] >= lookback][["日期 (Date)","状态 (Status)","数量 (Qty)","单价 (Unit Price)"]].copy()
         if not ev.empty:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
@@ -385,8 +379,7 @@ with tabs[1]:
             ).properties(title=f"{picked} — 事件时间线（近60天）")
             st.altair_chart(chart_ev, use_container_width=True)
 
-        # 最近记录（原始）
         st.markdown("#### 最近记录（原始）")
-        cols = ["日期 (Date)","状态 (Status)","数量 (Qty)","单价 (Unit Price)","总价 (Total Cost)","分类 (Category)","备注 (Notes)"]
+        cols = ["日期 (Date)","状态 (Status)","数量 (Qty)","单位 (Unit)","单价 (Unit Price)","总价 (Total Cost)","分类 (Category)","备注 (Notes)"]
         cols = [c for c in cols if c in item_df.columns]
         st.dataframe(safe_sort(item_df[cols], "日期 (Date)").iloc[::-1].head(10), use_container_width=True)
