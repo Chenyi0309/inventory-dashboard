@@ -23,6 +23,29 @@ try:
 except Exception:  # pragma: no cover
     APIError = None
 
+import re
+
+def _norm_col_name(s: object) -> str:
+    """规范化列名：把 NBSP/全角空格等统一成普通空格，并压缩重复空格。"""
+    if s is None:
+        return ""
+    s = str(s)
+    s = s.replace("\u00A0", " ").replace("\u3000", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def _norm_cell(v):
+    """把 None/NaN 统一成空串，避免写出空对象。"""
+    try:
+        import pandas as pd  # 已有 import 就不报错
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+    except Exception:
+        if v is None:
+            return ""
+    return v
+
+
 
 # ======== 常量 ========
 SHEET_URL_ENV = "INVENTORY_SHEET_URL"   # .streamlit/secrets 或环境变量里的表格 URL
@@ -198,37 +221,46 @@ def _norm_cell(v: Any) -> Any:
 
 
 # ======== 写入：单行 & 批量 ========
-def append_record(record: Dict[str, Any]) -> Tuple[int, dict]:
+def append_record(record: Dict) -> Tuple[int, dict]:
     ws = _get_ws()
     header = _header_cached()
-    row = [_norm_cell(record.get(col, "")) for col in header]
+    header_norm = [_norm_col_name(h) for h in header]
+
+    rec_norm = {_norm_col_name(k): _norm_cell(v) for k, v in record.items()}
+    row = [rec_norm.get(h, "") for h in header_norm]
 
     resp = _retry(lambda: ws.append_row(
         row,
         value_input_option="USER_ENTERED",
         insert_data_option="INSERT_ROWS",
         table_range="A1",
-        include_values_in_response=True,   # <<< 新增
+        include_values_in_response=True,
     ))
 
     bust_cache()
     return (ws.row_count, resp)
 
 
-def append_records_bulk(records: List[Dict[str, Any]]) -> dict:
+def append_records_bulk(records: List[Dict]) -> dict:
     if not records:
         return {}
 
     ws = _get_ws()
     header = _header_cached()
-    rows = [[_norm_cell(r.get(col, "")) for col in header] for r in records]
+    header_norm = [_norm_col_name(h) for h in header]
+
+    def _one(r: Dict) -> List:
+        rec_norm = {_norm_col_name(k): _norm_cell(v) for k, v in r.items()}
+        return [rec_norm.get(h, "") for h in header_norm]
+
+    rows = [_one(r) for r in records]
 
     resp = _retry(lambda: ws.append_rows(
         rows,
         value_input_option="USER_ENTERED",
         insert_data_option="INSERT_ROWS",
         table_range="A1",
-        include_values_in_response=True,   # <<< 新增
+        include_values_in_response=True,
     ))
 
     bust_cache()
