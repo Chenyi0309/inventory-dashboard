@@ -153,28 +153,35 @@ with tabs[0]:
         else:
             base = pd.DataFrame(columns=["物品名", "单位"])
 
-    edit_df = base.copy()
-    for col in ["物品名", "单位"]:
-        if col not in edit_df.columns:
-            edit_df[col] = ""
-    # 默认 None/NaN，便于“剩余=0”与“买入留空”区分
-    edit_df["数量"] = np.nan
-    if sel_status == "买入":
-        edit_df["单价"] = np.nan
-    edit_df["备注"] = ""
+        # ---------- 构造可编辑表 ----------
+        edit_df = base.copy()
+        for col in ["物品名", "单位"]:
+            if col not in edit_df.columns:
+                edit_df[col] = ""
+        
+        # 用字符串占位，便于 TextColumn 接受 '20%' 这类输入
+        edit_df["数量"] = ""
+        if sel_status == "买入":
+            edit_df["单价"] = np.nan
+        edit_df["备注"] = ""
+        
+        st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
 
-    st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
-    edited = st.data_editor(
-        edit_df,
-        use_container_width=True,
-        num_rows="dynamic",
-        column_config={
-            # 用 TextColumn 允许输入 '20%'
-            "数量": st.column_config.TextColumn(placeholder="可填 3、0.5 或 20%"),
-            "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status == "买入" else None,
-        },
-        key="bulk_editor",
-    )
+        edited = st.data_editor(
+            # 明确把“数量”列设成 object/str
+            edit_df.astype({"数量": "object"}),
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                # 删除 placeholder，保留一个简单的帮助提示
+                "数量": st.column_config.TextColumn(help="支持输入 3、0.5 或 20%"),
+                "单价": (
+                    st.column_config.NumberColumn(step=0.01, min_value=0.0)
+                    if sel_status == "买入" else None
+                ),
+            },
+            key="bulk_editor",
+        )
 
     # 批量写入 Google Sheet
     if st.button("✅ 批量保存到『购入/剩余』"):
