@@ -469,8 +469,8 @@ with tabs[1]:
         if unit in {"%", "％", "百分比", "percent", "ratio"}:
             return True
     
-        # 3) 统计表里多数百分比行单位是空串；允许统计溢出到 120%（1.2）
-        if unit == "" and pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.2:
+        # 3) 统计表里多数百分比行单位是空串；允许统计溢出到 150%（1.5）
+        if unit == "" and pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.5:
             return True
 
         return False
