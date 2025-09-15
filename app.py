@@ -38,7 +38,6 @@ except Exception:
 ALLOWED_CATS = ["食物类", "清洁类", "消耗品", "饮品类"]
 DEFAULT_CAT = "食物类"
 
-
 # ============== 仅用于录入页的轻量工具 ==============
 def safe_sort(df: pd.DataFrame, by: str, ascending=True):
     if df is None or df.empty or by not in df.columns:
@@ -81,7 +80,6 @@ def parse_qty_with_percent(raw, unit):
 
     # 3) 普通数量
     return pd.to_numeric(s, errors="coerce"), unit_norm
-
 
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
@@ -153,35 +151,35 @@ with tabs[0]:
         else:
             base = pd.DataFrame(columns=["物品名", "单位"])
 
-        # ---------- 构造可编辑表 ----------
-        edit_df = base.copy()
-        for col in ["物品名", "单位"]:
-            if col not in edit_df.columns:
-                edit_df[col] = ""
-        
-        # 用字符串占位，便于 TextColumn 接受 '20%' 这类输入
-        edit_df["数量"] = ""
-        if sel_status == "买入":
-            edit_df["单价"] = np.nan
-        edit_df["备注"] = ""
-        
-        st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
+    # ---------- 构造可编辑表 ----------
+    edit_df = base.copy()
+    for col in ["物品名", "单位"]:
+        if col not in edit_df.columns:
+            edit_df[col] = ""
+    
+    # 用字符串占位，便于 TextColumn 接受 '20%' 这类输入
+    edit_df["数量"] = ""
+    if sel_status == "买入":
+        edit_df["单价"] = np.nan
+    edit_df["备注"] = ""
+    
+    st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
 
-        edited = st.data_editor(
-            # 明确把“数量”列设成 object/str
-            edit_df.astype({"数量": "object"}),
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                # 删除 placeholder，保留一个简单的帮助提示
-                "数量": st.column_config.TextColumn(help="支持输入 3、0.5 或 20%"),
-                "单价": (
-                    st.column_config.NumberColumn(step=0.01, min_value=0.0)
-                    if sel_status == "买入" else None
-                ),
-            },
-            key="bulk_editor",
-        )
+    edited = st.data_editor(
+        # 明确把“数量”列设成 object/str
+        edit_df.astype({"数量": "object"}),
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            # 删除 placeholder，保留一个简单的帮助提示
+            "数量": st.column_config.TextColumn(help="支持输入 3、0.5 或 20%"),
+            "单价": (
+                st.column_config.NumberColumn(step=0.01, min_value=0.0)
+                if sel_status == "买入" else None
+            ),
+        },
+        key="bulk_editor",
+    )
 
     # 批量写入 Google Sheet
     if st.button("✅ 批量保存到『购入/剩余』"):
