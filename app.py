@@ -131,22 +131,30 @@ def _pct_ratio(qty_cell):
     return np.nan
 
 # ---------- 展示：表格居中 ----------
+# ---------- 展示：表格居中 + 两位小数 ----------
 def render_centered_table(df: pd.DataFrame):
-    # 用 pandas Styler 让表头与单元格居中
+    # 找出所有数值列
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # 为数值列统一设置两位小数
+    fmt_map = {c: "{:.2f}" for c in num_cols}
+
     styler = (
         df.style
-          .set_properties(**{"text-align": "center"})
+          .format(fmt_map)  # 两位小数
+          .set_properties(**{"text-align": "center"})  # 单元格居中
           .set_table_styles([
-              {"selector": "th", "props": [("text-align", "center")]},
+              {"selector": "th", "props": [("text-align", "center")]},        # 表头居中
               {"selector": "th.col_heading", "props": [("text-align", "center")]},
               {"selector": "th.row_heading", "props": [("text-align", "center")]},
           ])
     )
-    # 优先用交互表；部分版本不吃样式就降级到静态表
+
+    # 优先用交互表；如果版本不支持样式，就降级为静态表
     try:
         st.dataframe(styler, use_container_width=True)
     except Exception:
         st.table(styler)
+
 
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
