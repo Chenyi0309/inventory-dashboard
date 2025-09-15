@@ -455,28 +455,37 @@ with tabs[1]:
     stats = stats_all if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)]
     stats = stats.copy()
 
-    # 预警：普通<5；百分比/糖浆<20%
+    # 预警规则：百分比(<20%)；非百分比(预计还能用天数<3)
     def _is_percent_row(row: pd.Series) -> bool:
         name = str(row.get("食材名称 (Item Name)", "") or "")
         unit = str(row.get("单位 (Unit)", "") or "").strip()
         last_rem = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
+    
+        # 1) 名称里带“糖浆”直接按百分比处理（你之前的习惯）
         if "糖浆" in name:
             return True
+    
+        # 2) 单位明确是百分比
         if unit in {"%", "％", "百分比", "percent", "ratio"}:
             return True
-        if pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.0:
+    
+        # 3) 统计表里多数百分比行单位是空串；允许统计溢出到 120%（1.2）
+        if unit == "" and pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.2:
             return True
+
         return False
 
     def badge_row(row: pd.Series) -> str:
         if _is_percent_row(row):
-            val = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
-            if pd.notna(val) and float(val) < 0.2:
-                return "🚨 立即下单"
-            return "🟢 正常"
+            ratio = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
+            return "🚨 立即下单" if (pd.notna(ratio) and float(ratio) < 0.2) else "🟢 正常"
         else:
-            val = pd.to_numeric(row.get("当前库存"), errors="coerce")
-            if pd.notna(val) and float(val) < 5:
+            days_left = pd.to_numeric(row.get("预计还能用天数"), errors="coerce")
+            if pd.notna(days_left):
+                return "🚨 立即下单" if float(days_left) < 3 else "🟢 正常"
+            # 兜底：天数算不出时，如果当前库存为 0 也报警
+            cur = pd.to_numeric(row.get("当前库存"), errors="coerce")
+            if pd.notna(cur) and float(cur) == 0:
                 return "🚨 立即下单"
             return "🟢 正常"
 
