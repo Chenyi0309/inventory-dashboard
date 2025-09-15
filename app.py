@@ -315,6 +315,7 @@ with tabs[0]:
         except Exception as e:
             st.error(f"保存失败：{e}")
 
+
 # ================== 库存统计 ==================
 with tabs[1]:
     st.subheader("库存统计")
@@ -502,7 +503,7 @@ with tabs[1]:
             ).properties(title=f"{picked} — 剩余数量（近60天）")
             st.altair_chart(chart_stock, use_container_width=True)
 
-        # 事件时间线（近60天）—— 固定颜色
+        # 事件时间线（近60天）
         ev = item_df[item_df["日期 (Date)"] >= lookback][["日期 (Date)", "状态 (Status)", "数量 (Qty)", "单价 (Unit Price)"]].copy()
         if not ev.empty:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
