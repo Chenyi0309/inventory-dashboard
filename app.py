@@ -475,19 +475,39 @@ with tabs[1]:
 
         return False
 
+    def _unit_norm(u: str) -> str:
+        """单位统一：去空格、小写。"""
+        return str(u or "").strip().lower()
+    
     def badge_row(row: pd.Series) -> str:
-        if _is_percent_row(row):
-            ratio = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
-            return "🚨 立即下单" if (pd.notna(ratio) and float(ratio) < 0.2) else "🟢 正常"
-        else:
-            days_left = pd.to_numeric(row.get("预计还能用天数"), errors="coerce")
-            if pd.notna(days_left):
-                return "🚨 立即下单" if float(days_left) < 3 else "🟢 正常"
-            # 兜底：天数算不出时，如果当前库存为 0 也报警
+        # ===== 饮品类优先规则 =====
+        if str(row.get("类型", "")).strip() == "饮品类":
+            unit = _unit_norm(row.get("单位 (Unit)"))
             cur = pd.to_numeric(row.get("当前库存"), errors="coerce")
-            if pd.notna(cur) and float(cur) == 0:
+    
+            if pd.notna(cur):
+                s = float(cur)
+                # 单位是“箱”时，小于 2 报警
+                if unit in {"箱", "box"} and s < 2:
+                    return "🚨 立即下单"
+                # 单位是“瓶”或“袋”时，小于 6 报警
+                if unit in {"瓶", "袋", "bottle", "bag"} and s < 6:
+                    return "🚨 立即下单"
+            # 饮品类但不符合上面两个条件 -> 走通用规则继续判断
+    
+        # ===== 通用规则（非饮品类，或饮品类未触发上面的阈值）=====
+        # 1) 百分比物料：最近剩余数量 < 20% 报警
+        if _is_percent_row(row):
+            val = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
+            if pd.notna(val) and float(val) < 0.2:
                 return "🚨 立即下单"
             return "🟢 正常"
+    
+        # 2) 非百分比：预计还能用天数 < 3 天 报警
+        days = pd.to_numeric(row.get("预计还能用天数"), errors="coerce")
+        if pd.notna(days) and float(days) < 3:
+            return "🚨 立即下单"
+        return "🟢 正常"
 
     stats["库存预警"] = stats.apply(badge_row, axis=1) if not stats.empty else ""
 
