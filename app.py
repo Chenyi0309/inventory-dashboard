@@ -64,6 +64,30 @@ def _blank_if_none(x):
         pass
     return x
 
+def build_item_order_from_catalog() -> dict:
+    """
+    从『库存产品』sheet 的行顺序构建物品显示顺序。
+    返回形如 {物品名: 顺序号} 的映射；顺序号越小越靠前。
+    如果读不到主清单，则返回空 dict（后面会走兜底）。
+    """
+    try:
+        cat = read_catalog_fn()  # 复用你已有的读取主数据函数
+    except Exception:
+        cat = pd.DataFrame()
+
+    if cat is None or cat.empty or "物品名" not in cat.columns:
+        return {}
+
+    order = {}
+    seen = set()
+    # 按在主清单中的出现顺序记录第一次出现的位置
+    for idx, x in enumerate(list(cat["物品名"].astype(str))):
+        name = x.strip()
+        if name and name not in seen:
+            order[name] = idx
+            seen.add(name)
+    return order
+
 # ---------- 把数量解析成表格要写的形态 ----------
 def to_qty_cell(raw, unit_in: str):
     """
@@ -407,6 +431,16 @@ with tabs[1]:
     sel_type_bar = fc1.selectbox("选择分类", ["全部"] + ALLOWED_CATS, index=0)
     stats = stats_all.copy() if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)].copy()
 
+    # —— 固定显示顺序：来自『库存产品』sheet 的行顺序
+    order_map = build_item_order_from_catalog()
+    if order_map:
+        # 给每一行打上顺序标签；不在主清单中的放到最后
+        BIG = 10**9
+        stats_all["__order__"] = stats_all["食材名称 (Item Name)"].map(order_map).fillna(BIG)
+    else:
+        # 兜底：没有主清单顺序时，保持原有顺序（或你想要的其它规则）
+        stats_all["__order__"] = range(len(stats_all))
+
     # 预警：普通<5；百分比/糖浆<20%
     def _is_percent_row(row: pd.Series) -> bool:
         name = str(row.get("食材名称 (Item Name)", "") or "")
@@ -450,13 +484,11 @@ with tabs[1]:
     ]
     show = stats[[c for c in display_cols if c in stats.columns]].copy()
 
-    # 排序：按预警严重&还能用天数
-    severity = {"🚨 立即下单": 0, "🟢 正常": 2, "": 3}
-    if "库存预警" in show.columns:
-        show["__sev__"] = show["库存预警"].map(severity).fillna(3)
-        if "预计还能用天数" in show.columns:
-            show = show.sort_values(["__sev__", "预计还能用天数"], ascending=[True, True])
-        show = show.drop(columns="__sev__", errors="ignore")
+    # 先按选择的分类做子集
+    stats = stats_all.copy() if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)].copy()
+    
+    # 在固定顺序下排序（顺序来自主清单行序）
+    stats = stats.sort_values("__order__", kind="stable")
 
     if show.empty:
         st.info("暂无统计结果。请检查『购入/剩余』表的表头/数据是否完整。")
