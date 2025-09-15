@@ -60,27 +60,49 @@ def _blank_if_none(x):
         pass
     return x
 
-def parse_qty_with_percent(raw, unit):
-    """把数量里带 % 的输入或单位为 % 的输入，统一转换成 0~1 的小数，并把单位标准化为 '%'。"""
-    unit_norm = (unit or "").replace("％", "%").strip()
-    s = str(raw).strip() if raw is not None else ""
+def _fmt_pct(x: float) -> str:
+    s = f"{x:.2f}".rstrip("0").rstrip(".")
+    return s
 
-    # 1) 数量里自带百分号，如 '20%'
+# ---------- 辅助：把数量解析成表格要写的形态 ----------
+def to_qty_cell(raw, unit_in: str):
+    """
+    返回: (qty_cell, unit_out, is_pct)
+    - 若数量里带 '%' 或 单位是百分号 -> is_pct=True，qty_cell 是 '50%' 这样的字符串；
+    - 其他情况 -> is_pct=False，qty_cell 是数字(float 或 nan)；
+    - unit_out: 当单位不是 % 时按用户填写返回；若用户把单位写成 %，则返回空串。
+    """
+    s = "" if raw is None else str(raw).strip()
+    unit_norm = (unit_in or "").replace("％", "%").strip()
+
+    # 数量里带百分号
     if s.endswith("%"):
         num = pd.to_numeric(s[:-1], errors="coerce")
-        return (float(num) / 100.0 if pd.notna(num) else np.nan), "%"
+        if pd.isna(num):
+            return "", ("" if unit_norm == "%" else unit_norm), True
+        # 写回去就是 '50%' 这种
+        qty_txt = f"{int(num)}%" if float(num).is_integer() else f"{float(num)}%"
+        return qty_txt, ("" if unit_norm == "%" else unit_norm), True
 
-    # 2) 单位是百分号
-    if unit_norm in {"%", "百分比", "percent", "ratio"}:
+    # 单位是百分号
+    if unit_norm in {"%", "percent", "百分比", "ratio"}:
         num = pd.to_numeric(s, errors="coerce")
         if pd.isna(num):
-            return np.nan, "%"
-        num = float(num)
-        return (num / 100.0 if num > 1 else num), "%"
+            return "", "", True
+        qty_txt = f"{int(num)}%" if float(num).is_integer() else f"{float(num)}%"
+        return qty_txt, "", True
 
-    # 3) 普通数量
-    return pd.to_numeric(s, errors="coerce"), unit_norm
+    # 普通数量
+    return pd.to_numeric(s, errors="coerce"), unit_norm, False
 
+def _pct_ratio(qty_cell):
+    """'50%' -> 0.5；否则返回 NaN。"""
+    if isinstance(qty_cell, str) and qty_cell.strip().endswith("%"):
+        try:
+            return float(qty_cell.strip()[:-1]) / 100.0
+        except Exception:
+            return np.nan
+    return np.nan
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
 
@@ -223,37 +245,85 @@ with tabs[0]:
             st.warning("请至少填写一个物品的‘物品名’和‘数量’（买入>0；剩余可=0）")
             st.stop()
 
-        # 2) 构造 payload + 预览
+       # ---------- 2) 构造 payload + 预览 ----------
         dt = pd.to_datetime(sel_date)
         payload = []
         preview = []
-
-        for rr in valid_rows:
-            qty  = rr["数量"]
-            unit = rr["单位"]
-            price = rr.get("单价", None)
-            total = round(qty * price, 2) if (sel_status == "买入" and price is not None) else None
-
+        
+        for _, r in rows.iterrows():
+            name = str(r.get("物品名", "") or "").strip()
+            if not name:
+                continue
+        
+            unit_in = str(r.get("单位", "") or "").strip()
+            qty_cell, unit_out, is_pct = to_qty_cell(r.get("数量", np.nan), unit_in)
+        
+            # ---- 买入 / 剩余 的校验与落表值 ----
+            if sel_status == "买入":
+                # 允许百分比或纯数字；都必须 > 0
+                if is_pct:
+                    ratio = _pct_ratio(qty_cell)   # '50%' -> 0.5
+                    if not (pd.notna(ratio) and ratio > 0):
+                        continue
+                    qty_to_sheet = qty_cell       # 写 '50%' 到“数量”
+                    qty_for_cost = ratio          # 金额用 0.5 参与计算
+                else:
+                    try:
+                        qty_num = float(qty_cell)
+                    except Exception:
+                        qty_num = np.nan
+                    if not (pd.notna(qty_num) and qty_num > 0):
+                        continue
+                    qty_to_sheet = qty_num        # 写数字到“数量”
+                    qty_for_cost = qty_num        # 金额用数字
+            else:
+                # 剩余：允许百分比或数字（可=0）
+                if is_pct:
+                    qty_to_sheet = qty_cell       # '50%' 原样写回
+                else:
+                    try:
+                        qty_num = float(qty_cell)
+                    except Exception:
+                        qty_num = np.nan
+                    if pd.isna(qty_num):          # 剩余至少要能解析成数字(可=0)或是百分比
+                        continue
+                    qty_to_sheet = qty_num
+                qty_for_cost = None               # 剩余不计总价
+        
+            # ---- 价格 / 总价 ----
+            price = None
+            total = None
+            if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
+                try:
+                    price = float(r["单价"])
+                except Exception:
+                    price = None
+                if price is not None:
+                    # 若是百分比买入，用 ratio 计算金额；否则用数字数量
+                    factor = qty_for_cost if qty_for_cost is not None else np.nan
+                    if pd.notna(factor):
+                        total = round(float(factor) * price, 2)
+        
+            # ---- 组装写入行 ----
             record = {
                 "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",
-                "食材名称 (Item Name)": rr["物品名"],
+                "食材名称 (Item Name)": name,
                 "分类 (Category)": sel_type,
-                "数量 (Qty)": qty,
-                "单位 (Unit)": unit,
+                "数量 (Qty)": qty_to_sheet,            # 可能是数字，也可能是 '50%'
+                "单位 (Unit)": unit_out,               # 继续保持“箱/袋/个”，如果用户填了 % 就置空
                 "单价 (Unit Price)": "" if price is None else price,
                 "总价 (Total Cost)": "" if total is None else total,
                 "状态 (Status)": sel_status,
-                "备注 (Notes)": rr["备注"],
+                "备注 (Notes)": str(r.get("备注", "") or "").strip(),
             }
             payload.append(record)
-
-            # 预览：百分比显示为 20%
-            display_qty = f"{round(qty*100, 2)}%" if unit == "%" else qty
+        
+            # ---- 预览 ----
             row_preview = {
                 "日期": dt.date().isoformat(),
-                "物品名": rr["物品名"],
-                "数量": display_qty,
-                "单位": unit,
+                "物品名": name,
+                "数量": qty_to_sheet,
+                "单位": unit_out,
                 "状态": sel_status,
             }
             if sel_status == "买入":
