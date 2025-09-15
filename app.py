@@ -21,7 +21,11 @@ if sheet_url:
 # 读写 Google Sheet
 from gsheet import append_records_bulk
 try:
-    from gsheet import read_records_cached as read_records_fn, read_catalog_cached as read_catalog_fn, bust_cache
+    from gsheet import (
+        read_records_cached as read_records_fn,
+        read_catalog_cached as read_catalog_fn,
+        bust_cache,
+    )
 except Exception:
     from gsheet import read_records as read_records_fn, read_catalog as read_catalog_fn
     def bust_cache(): pass
@@ -60,17 +64,13 @@ def _blank_if_none(x):
         pass
     return x
 
-def _fmt_pct(x: float) -> str:
-    s = f"{x:.2f}".rstrip("0").rstrip(".")
-    return s
-
-# ---------- 辅助：把数量解析成表格要写的形态 ----------
+# ---------- 把数量解析成表格要写的形态 ----------
 def to_qty_cell(raw, unit_in: str):
     """
     返回: (qty_cell, unit_out, is_pct)
     - 若数量里带 '%' 或 单位是百分号 -> is_pct=True，qty_cell 是 '50%' 这样的字符串；
-    - 其他情况 -> is_pct=False，qty_cell 是数字(float 或 nan)；
-    - unit_out: 当单位不是 % 时按用户填写返回；若用户把单位写成 %，则返回空串。
+    - 其他情况 -> is_pct=False，qty_cell 是数字(float 或 NaN)；
+    - unit_out: 当单位不是 % 时按用户填写返回；若单位写成 %/percent/百分比/ratio，则返回空串。
     """
     s = "" if raw is None else str(raw).strip()
     unit_norm = (unit_in or "").replace("％", "%").strip()
@@ -80,8 +80,9 @@ def to_qty_cell(raw, unit_in: str):
         num = pd.to_numeric(s[:-1], errors="coerce")
         if pd.isna(num):
             return "", ("" if unit_norm == "%" else unit_norm), True
-        # 写回去就是 '50%' 这种
-        qty_txt = f"{int(num)}%" if float(num).is_integer() else f"{float(num)}%"
+        # 写回去就是 '50%' 这种；尽量去掉多余小数
+        numf = float(num)
+        qty_txt = f"{int(numf)}%" if numf.is_integer() else f"{numf}%"
         return qty_txt, ("" if unit_norm == "%" else unit_norm), True
 
     # 单位是百分号
@@ -89,20 +90,22 @@ def to_qty_cell(raw, unit_in: str):
         num = pd.to_numeric(s, errors="coerce")
         if pd.isna(num):
             return "", "", True
-        qty_txt = f"{int(num)}%" if float(num).is_integer() else f"{float(num)}%"
+        numf = float(num)
+        qty_txt = f"{int(numf)}%" if numf.is_integer() else f"{numf}%"
         return qty_txt, "", True
 
     # 普通数量
     return pd.to_numeric(s, errors="coerce"), unit_norm, False
 
 def _pct_ratio(qty_cell):
-    """'50%' -> 0.5；否则返回 NaN。"""
+    """'50%' -> 0.5；否则返回 NaN。仅用于金额计算等数值场景。"""
     if isinstance(qty_cell, str) and qty_cell.strip().endswith("%"):
         try:
             return float(qty_cell.strip()[:-1]) / 100.0
         except Exception:
             return np.nan
     return np.nan
+
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
 
@@ -125,7 +128,6 @@ with c2:
     )
 
 tabs = st.tabs(["➕ 录入记录", "📊 库存统计"])
-
 
 # ================== 录入记录 ==================
 with tabs[0]:
@@ -178,86 +180,39 @@ with tabs[0]:
     for col in ["物品名", "单位"]:
         if col not in edit_df.columns:
             edit_df[col] = ""
-    
-    # 用字符串占位，便于 TextColumn 接受 '20%' 这类输入
+    # 数量用字符串占位，便于 TextColumn 接受 '20%' 这类输入
     edit_df["数量"] = ""
     if sel_status == "买入":
         edit_df["单价"] = np.nan
     edit_df["备注"] = ""
-    
+
     st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
 
     edited = st.data_editor(
-        # 明确把“数量”列设成 object/str
-        edit_df.astype({"数量": "object"}),
+        edit_df.astype({"数量": "object"}),  # 明确把“数量”设为 object/str
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            # 删除 placeholder，保留一个简单的帮助提示
-            "数量": st.column_config.TextColumn(help="支持输入 3、0.5 或 20%"),
-            "单价": (
-                st.column_config.NumberColumn(step=0.01, min_value=0.0)
-                if sel_status == "买入" else None
-            ),
+            "数量": st.column_config.TextColumn(help="支持 3、0.5 或 20%"),
+            "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status == "买入" else None,
         },
         key="bulk_editor",
     )
 
     # 批量写入 Google Sheet
     if st.button("✅ 批量保存到『购入/剩余』"):
-        # 1) 逐行解析（支持百分比），并做校验与清洗
-        rows_raw = edited.copy()
-
-        valid_rows = []
-        for _, r in rows_raw.iterrows():
-            name = str(r.get("物品名", "")).strip()
-            if not name:
-                continue
-
-            unit_in = str(r.get("单位", "") or "").strip()
-            qty, unit_norm = parse_qty_with_percent(r.get("数量", ""), unit_in)
-
-            # 数量必须是数值；买入>0；剩余>=0（允许记录 0）
-            if pd.isna(qty):
-                continue
-            qf = float(qty)
-            if sel_status == "买入":
-                if qf <= 0:
-                    continue
-            else:  # 剩余
-                if qf < 0:
-                    continue
-
-            row_clean = {
-                "物品名": name,
-                "单位": unit_norm,
-                "数量": qf,
-                "备注": str(r.get("备注", "") or "").strip(),
-            }
-
-            if sel_status == "买入":
-                price = pd.to_numeric(r.get("单价", ""), errors="coerce")
-                row_clean["单价"] = float(price) if pd.notna(price) else None
-
-            valid_rows.append(row_clean)
-
-        if not valid_rows:
-            st.warning("请至少填写一个物品的‘物品名’和‘数量’（买入>0；剩余可=0）")
-            st.stop()
-
-       # ---------- 2) 构造 payload + 预览 ----------
         dt = pd.to_datetime(sel_date)
         payload = []
         preview = []
-        
-        for _, r in rows.iterrows():
+
+        for _, r in edited.iterrows():
             name = str(r.get("物品名", "") or "").strip()
             if not name:
                 continue
-        
+
             unit_in = str(r.get("单位", "") or "").strip()
-            qty_cell, unit_out, is_pct = to_qty_cell(r.get("数量", np.nan), unit_in)
-        
+            qty_cell, unit_out, is_pct = to_qty_cell(r.get("数量", ""), unit_in)
+
             # ---- 买入 / 剩余 的校验与落表值 ----
             if sel_status == "买入":
                 # 允许百分比或纯数字；都必须 > 0
@@ -289,11 +244,11 @@ with tabs[0]:
                         continue
                     qty_to_sheet = qty_num
                 qty_for_cost = None               # 剩余不计总价
-        
+
             # ---- 价格 / 总价 ----
             price = None
             total = None
-            if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
+            if sel_status == "买入" and pd.notna(r.get("单价", np.nan)):
                 try:
                     price = float(r["单价"])
                 except Exception:
@@ -303,21 +258,21 @@ with tabs[0]:
                     factor = qty_for_cost if qty_for_cost is not None else np.nan
                     if pd.notna(factor):
                         total = round(float(factor) * price, 2)
-        
+
             # ---- 组装写入行 ----
             record = {
                 "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",
                 "食材名称 (Item Name)": name,
                 "分类 (Category)": sel_type,
                 "数量 (Qty)": qty_to_sheet,            # 可能是数字，也可能是 '50%'
-                "单位 (Unit)": unit_out,               # 继续保持“箱/袋/个”，如果用户填了 % 就置空
+                "单位 (Unit)": unit_out,               # 正常单位；若用户填了 % 则置空
                 "单价 (Unit Price)": "" if price is None else price,
                 "总价 (Total Cost)": "" if total is None else total,
                 "状态 (Status)": sel_status,
                 "备注 (Notes)": str(r.get("备注", "") or "").strip(),
             }
             payload.append(record)
-        
+
             # ---- 预览 ----
             row_preview = {
                 "日期": dt.date().isoformat(),
@@ -338,7 +293,7 @@ with tabs[0]:
                 st.success(f"已成功写入 {len(payload)} 条记录！")
                 st.caption(f"目标表：{st.secrets.get('INVENTORY_SHEET_URL') or os.getenv('INVENTORY_SHEET_URL')}")
 
-                # 显示 Google 返回的写入区间（用于定位到底写到哪一段）
+                # 显示 Google 返回的写入区间（用于定位）
                 from gsheet import parse_updated_range_rows, tail_rows
                 rng = resp.get("updates", {}).get("updatedRange", "")
                 st.caption(f"Google 返回写入区间：{rng}")
@@ -379,7 +334,7 @@ with tabs[0]:
                     ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
                     st.markdown("**写入后的回读校验**")
                     if just_now.empty:
-                        st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白区域影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
+                        st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
                     else:
                         st.dataframe(just_now.sort_values("日期 (Date)"), use_container_width=True)
                 except Exception:
@@ -389,7 +344,6 @@ with tabs[0]:
                 st.info("没有可写入的记录。")
         except Exception as e:
             st.error(f"保存失败：{e}")
-
 
 # ================== 库存统计 ==================
 with tabs[1]:
