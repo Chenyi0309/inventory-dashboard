@@ -61,6 +61,28 @@ def _blank_if_none(x):
         pass
     return x
 
+def parse_qty_with_percent(raw, unit):
+    unit_norm = (unit or "").replace("％", "%").strip()
+    s = str(raw).strip() if raw is not None else ""
+    # 1) 数量里自带百分号
+    if s.endswith("%"):
+        num = pd.to_numeric(s[:-1], errors="coerce")
+        return (float(num) / 100.0 if pd.notna(num) else np.nan), "%"
+
+    # 2) 单位是百分号
+    if unit_norm in {"%", "百分比", "percent", "ratio"}:
+        num = pd.to_numeric(s, errors="coerce")
+        if pd.isna(num):
+            return np.nan, "%"
+        num = float(num)
+        return (num / 100.0 if num > 1 else num), "%"
+
+    # 3) 普通数量
+    return pd.to_numeric(s, errors="coerce"), unit_norm
+
+# 循环里用：
+unit = str(r.get("单位", "") or "").strip()
+qty, unit = parse_qty_with_percent(r["数量"], unit)
 
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
@@ -136,9 +158,9 @@ with tabs[0]:
     for col in ["物品名", "单位"]:
         if col not in edit_df.columns:
             edit_df[col] = ""
-    edit_df["数量"] = 0.0
+    edit_df["数量"] = np.nan
     if sel_status == "买入":
-        edit_df["单价"] = 0.0
+        edit_df["单价"] = np.nan
     edit_df["备注"] = ""
 
     st.markdown("**在下表中填写数量（必填），单价仅在买入时填写；可添加新行录入新物品**")
@@ -147,7 +169,7 @@ with tabs[0]:
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            "数量": st.column_config.NumberColumn(step=0.1, min_value=0.0),
+            "数量": st.column_config.TextColumn(placeholder="可填 3、0.5 或 20%"),
             "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status == "买入" else None,
         },
         key="bulk_editor",
@@ -158,42 +180,51 @@ with tabs[0]:
         # 1) 取出可编辑表格的内容
         rows = edited.copy()
         rows["数量"] = pd.to_numeric(rows["数量"], errors="coerce")
-        rows = rows[(rows["数量"].fillna(0) > 0) & (rows["物品名"].astype(str).str.strip() != "")]
+
+        # ✅ 名称非空
+        name_ok = rows["物品名"].astype(str).str.strip() != ""
+
+        if sel_status == "买入":
+            # 买入：必须 > 0
+            qty_ok = rows["数量"].fillna(0) > 0
+        else:
+            # 剩余：允许 = 0（记录断货）
+            qty_ok = rows["数量"].notna()
+
+        rows = rows[name_ok & qty_ok]
         if rows.empty:
-            st.warning("请至少填写一个物品的‘物品名’和‘数量’")
+            st.warning("请至少填写一个物品的‘物品名’和‘数量’（买入>0；剩余可=0）")
             st.stop()
 
         # 2) 组装成要写入表格的 dict 列表（批量）＋ 预览明细
-        dt = pd.to_datetime(sel_date)           # 日期只算一次
+        dt = pd.to_datetime(sel_date)
         payload = []
-        preview = []                            # 给用户看的写入明细
-
+        preview = []
+        
         for _, r in rows.iterrows():
             qty   = float(r["数量"])
             unit  = str(r.get("单位", "") or "").strip()
-
+        
             price = None
             total = None
             if sel_status == "买入" and "单价" in r and pd.notna(r["单价"]):
                 price = float(r["单价"])
                 total = round(qty * price, 2)
-
+        
             record = {
-                "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",   # 强制日期型
+                "日期 (Date)": f"=DATE({dt.year},{dt.month},{dt.day})",
                 "食材名称 (Item Name)": str(r["物品名"]).strip(),
                 "分类 (Category)": sel_type,
                 "数量 (Qty)": qty,
                 "单位 (Unit)": unit,
-                "单价 (Unit Price)": _blank_if_none(price) if sel_status == "买入" else "",
-                "总价 (Total Cost)": _blank_if_none(total) if sel_status == "买入" else "",
+                "单价 (Unit Price)": "" if price is None else price,     # ✅ 空则不写 0
+                "总价 (Total Cost)": "" if total is None else total,       # ✅ 空则不写 0
                 "状态 (Status)": sel_status,
                 "备注 (Notes)": str(r.get("备注", "")).strip(),
             }
-            # 彻底清洗 None/NaN -> ""，防止追加函数丢行
-            record = {k: _blank_if_none(v) for k, v in record.items()}
             payload.append(record)
-
-            # 预览用的精简行
+        
+            # 预览
             row_preview = {
                 "日期": dt.date().isoformat(),
                 "物品名": str(r["物品名"]).strip(),
