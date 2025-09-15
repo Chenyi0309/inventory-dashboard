@@ -557,10 +557,6 @@ with tabs[1]:
         st.info("暂无统计结果。请检查『购入/剩余』表的表头/数据是否完整。")
     render_centered_table(show)
 
-    # 导出
-    csv = show.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("⬇️ 导出统计结果（CSV）", data=csv, file_name="inventory_stats.csv", mime="text/csv")
-
     # ============ 下钻：物品详情 ============
     st.markdown("### 🔍 物品详情")
     detail_items = ["（不选）"] + (list(show["食材名称 (Item Name)"].dropna().unique()) if "食材名称 (Item Name)" in show.columns else [])
