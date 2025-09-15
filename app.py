@@ -410,12 +410,12 @@ with tabs[1]:
     # 统计表
     stats_all = compute_stats(df)
 
-    # “类型”列用于筛选
+    # 附上“类型”列用于筛选（取该物品最近一次的分类）
     if not df.empty and "食材名称 (Item Name)" in df.columns:
         latest_cat = (
             df.sort_values("日期 (Date)")
-            .groupby("食材名称 (Item Name)")["分类 (Category)"]
-            .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else DEFAULT_CAT)
+              .groupby("食材名称 (Item Name)")["分类 (Category)"]
+              .agg(lambda s: s.dropna().iloc[-1] if len(s.dropna()) else DEFAULT_CAT)
         )
         stats_all = stats_all.merge(
             latest_cat.rename("类型"),
@@ -425,21 +425,35 @@ with tabs[1]:
         stats_all["类型"] = DEFAULT_CAT
     stats_all["类型"] = stats_all["类型"].apply(normalize_cat)
 
+    # ---------- 固定显示顺序：来自『库存产品』的行顺序 ----------
+    def _norm_name(s):
+        # 去前后空格 + 去除所有空白字符，避免“看不见的空格”影响匹配
+        return (str(s) if s is not None else "").strip().replace(" ", "")
+
+    try:
+        order_df = read_catalog_fn().copy()
+    except Exception:
+        order_df = pd.DataFrame()
+
+    if not order_df.empty and "物品名" in order_df.columns:
+        order_df["类型"] = order_df.get("类型", "").apply(normalize_cat)
+        order_df["name_norm"] = order_df["物品名"].map(_norm_name)
+        order_df["__order__"] = np.arange(len(order_df), dtype=float)
+        order_map = dict(zip(order_df["name_norm"], order_df["__order__"]))
+    else:
+        order_map = {}
+
+    BIG = float(1e9)  # 匹配不到的放到最后
+    stats_all["name_norm"] = stats_all["食材名称 (Item Name)"].map(_norm_name)
+    stats_all["__order__"] = stats_all["name_norm"].map(order_map).fillna(BIG)
+
     # === 筛选条（作用于下方结果表） ===
     st.markdown("#### 筛选")
     fc1, _ = st.columns([1, 3])
     sel_type_bar = fc1.selectbox("选择分类", ["全部"] + ALLOWED_CATS, index=0)
-    stats = stats_all.copy() if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)].copy()
 
-    # —— 固定显示顺序：来自『库存产品』sheet 的行顺序
-    order_map = build_item_order_from_catalog()
-    if order_map:
-        # 给每一行打上顺序标签；不在主清单中的放到最后
-        BIG = 10**9
-        stats_all["__order__"] = stats_all["食材名称 (Item Name)"].map(order_map).fillna(BIG)
-    else:
-        # 兜底：没有主清单顺序时，保持原有顺序（或你想要的其它规则）
-        stats_all["__order__"] = range(len(stats_all))
+    stats = stats_all if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)]
+    stats = stats.copy()
 
     # 预警：普通<5；百分比/糖浆<20%
     def _is_percent_row(row: pd.Series) -> bool:
@@ -448,7 +462,7 @@ with tabs[1]:
         last_rem = pd.to_numeric(row.get("最近剩余数量"), errors="coerce")
         if "糖浆" in name:
             return True
-        if unit in ["%", "％", "百分比", "percent", "ratio"]:
+        if unit in {"%", "％", "百分比", "percent", "ratio"}:
             return True
         if pd.notna(last_rem) and 0.0 <= float(last_rem) <= 1.0:
             return True
@@ -466,14 +480,14 @@ with tabs[1]:
                 return "🚨 立即下单"
             return "🟢 正常"
 
-    if not stats.empty:
-        stats["库存预警"] = stats.apply(badge_row, axis=1)
-    else:
-        stats["库存预警"] = ""
+    stats["库存预警"] = stats.apply(badge_row, axis=1) if not stats.empty else ""
 
-    # 仅保留一个 KPI：记录数量
+    # —— 在固定顺序下排序（只按 __order__；mergesort 保持稳定）
+    stats_sorted = stats.sort_values("__order__", kind="mergesort")
+
+    # KPI（用排序后的结果）
     c1, = st.columns(1)
-    total_items = int(stats["食材名称 (Item Name)"].nunique()) if not stats.empty and "食材名称 (Item Name)" in stats.columns else 0
+    total_items = int(stats_sorted["食材名称 (Item Name)"].nunique()) if not stats_sorted.empty else 0
     c1.metric("记录数量", value=total_items)
 
     # 结果表
@@ -482,13 +496,7 @@ with tabs[1]:
         "预计还能用天数", "最近统计剩余日期", "最近采购日期",
         "最近采购数量", "最近采购单价", "平均采购间隔(天)", "累计支出", "库存预警"
     ]
-    show = stats[[c for c in display_cols if c in stats.columns]].copy()
-
-    # 先按选择的分类做子集
-    stats = stats_all.copy() if sel_type_bar == "全部" else stats_all[stats_all["类型"].eq(sel_type_bar)].copy()
-    
-    # 在固定顺序下排序（顺序来自主清单行序）
-    stats = stats.sort_values("__order__", kind="stable")
+    show = stats_sorted[[c for c in display_cols if c in stats_sorted.columns]].copy()
 
     if show.empty:
         st.info("暂无统计结果。请检查『购入/剩余』表的表头/数据是否完整。")
@@ -570,10 +578,7 @@ with tabs[1]:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
             status_color = alt.Color(
                 "状态 (Status):N",
-                scale=alt.Scale(
-                    domain=["买入", "剩余"],
-                    range=["#1f77b4", "#E4572E"]
-                ),
+                scale=alt.Scale(domain=["买入", "剩余"], range=["#1f77b4", "#E4572E"]),
                 legend=alt.Legend(title="状态")
             )
             chart_ev = alt.Chart(ev).mark_point(filled=True, size=80).encode(
