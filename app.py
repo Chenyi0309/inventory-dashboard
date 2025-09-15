@@ -130,6 +130,24 @@ def _pct_ratio(qty_cell):
             return np.nan
     return np.nan
 
+# ---------- 展示：表格居中 ----------
+def render_centered_table(df: pd.DataFrame):
+    # 用 pandas Styler 让表头与单元格居中
+    styler = (
+        df.style
+          .set_properties(**{"text-align": "center"})
+          .set_table_styles([
+              {"selector": "th", "props": [("text-align", "center")]},
+              {"selector": "th.col_heading", "props": [("text-align", "center")]},
+              {"selector": "th.row_heading", "props": [("text-align", "center")]},
+          ])
+    )
+    # 优先用交互表；部分版本不吃样式就降级到静态表
+    try:
+        st.dataframe(styler, use_container_width=True)
+    except Exception:
+        st.table(styler)
+
 # ================ APP UI =======================
 st.set_page_config(page_title="Gangnam 库存管理", layout="wide")
 
@@ -529,7 +547,7 @@ with tabs[1]:
 
     if show.empty:
         st.info("暂无统计结果。请检查『购入/剩余』表的表头/数据是否完整。")
-    st.dataframe(show, use_container_width=True)
+    render_centered_table(show)
 
     # 导出
     csv = show.to_csv(index=False).encode("utf-8-sig")
