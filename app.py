@@ -38,7 +38,7 @@ except Exception:
     def normalize_columns_compute(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
-# 允许的四个类别（硬编码）—— 已改为中英
+# 允许的四个类别（硬编码）—— 中英
 ALLOWED_CATS = [
     "食物类Food",
     "清洁类Cleaning",
@@ -393,9 +393,11 @@ with tabs[0]:
                     df_check = normalize_columns_compute(df_check)
                     dd = pd.to_datetime(df_check.get("日期 (Date)"), errors="coerce").dt.date
                     names = [p["物品名 Item"] for p in preview]
+                    # 归一化后的状态：买入 / 剩余
+                    norm_status = "买入" if sel_status.startswith("买入") else "剩余"
                     just_now = df_check[
                         (dd == dt.date()) &
-                        (df_check.get("状态 (Status)") == sel_status) &
+                        (df_check.get("状态 (Status)") == norm_status) &
                         (df_check.get("食材名称 (Item Name)").isin(names))
                     ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
                     st.markdown("**写入后的回读校验 / Read-back check**")
@@ -561,7 +563,7 @@ with tabs[1]:
     total_items = int(stats_sorted["食材名称 (Item Name)"].nunique()) if not stats_sorted.empty else 0
     c1.metric("记录数量 Items", value=total_items)
 
-    # 结果表
+    # 结果表（原始列名，用于后面下钻）
     display_cols = [
         "食材名称 (Item Name)", "当前库存", "单位 (Unit)", "平均最近两周使用量",
         "预计还能用天数", "最近统计剩余日期", "最近采购日期",
@@ -571,7 +573,24 @@ with tabs[1]:
 
     if show.empty:
         st.info("暂无统计结果。请检查『购入/剩余 Purchased/Remaining』表的表头/数据是否完整。 / No statistics yet, please check the Purchased/Remaining sheet.")
-    render_centered_table(show)
+    else:
+        # ===== 表头：中文 + 英文，换行显示 =====
+        header_rename = {
+            "食材名称 (Item Name)": "食材名称\nItem Name",
+            "当前库存": "当前库存\nOn-hand Inventory",
+            "单位 (Unit)": "单位\nUnit",
+            "平均最近两周使用量": "平均最近两周使用量\nAvg Usage (Last 14 Days)",
+            "预计还能用天数": "预计还能用天数\nEst. Days Remaining",
+            "最近统计剩余日期": "最近统计剩余日期\nLast Stock Check Date",
+            "最近采购日期": "最近采购日期\nLast Purchase Date",
+            "最近采购数量": "最近采购数量\nLast Purchase Qty",
+            "最近采购单价": "最近采购单价\nLast Unit Price",
+            "平均采购间隔(天)": "平均采购间隔(天)\nAvg Purchase Interval (Days)",
+            "累计支出": "累计支出\nTotal Spend",
+            "库存预警": "库存预警\nStock Alert",
+        }
+        show_display = show.rename(columns=header_rename)
+        render_centered_table(show_display)
 
     # ============ 下钻：物品详情 ============
     st.markdown("### 🔍 物品详情 / Item details")
@@ -586,8 +605,9 @@ with tabs[1]:
             item_df["row_order"] = item_df["__orig_idx__"]
         item_df = item_df.sort_values(["日期 (Date)", "row_order"])
 
-        rem = item_df[item_df.get("状态 (Status)") == "剩余Remaining"].copy()
-        buy = item_df[item_df.get("状态 (Status)") == "买入Purchase"].copy()
+        # 这里使用规范化后的中文状态值：买入 / 剩余
+        rem = item_df[item_df.get("状态 (Status)") == "剩余"].copy()
+        buy = item_df[item_df.get("状态 (Status)") == "买入"].copy()
 
         if len(rem):
             last_rem = rem.iloc[-1]
@@ -598,7 +618,7 @@ with tabs[1]:
                 (item_df["日期 (Date)"] > last_date) |
                 ((item_df["日期 (Date)"] == last_date) & (item_df["row_order"] > last_ord))
             )
-            buys_after = item_df[mask_after & (item_df["状态 (Status)"] == "买入Purchase")]
+            buys_after = item_df[mask_after & (item_df["状态 (Status)"] == "买入")]
             cur_stock = float(last_qty + buys_after["数量 (Qty)"].sum())
         else:
             cur_stock = float(buy["数量 (Qty)"].sum()) if len(buy) else float("nan")
@@ -645,7 +665,7 @@ with tabs[1]:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
             status_color = alt.Color(
                 "状态 (Status):N",
-                scale=alt.Scale(domain=["买入Purchase", "剩余Remaining"], range=["#1f77b4", "#E4572E"]),
+                scale=alt.Scale(domain=["买入", "剩余"], range=["#1f77b4", "#E4572E"]),
                 legend=alt.Legend(title="状态 Status")
             )
             chart_ev = alt.Chart(ev).mark_point(filled=True, size=80).encode(
