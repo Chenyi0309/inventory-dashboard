@@ -252,15 +252,41 @@ with tabs[0]:
         edit_df["单价"] = np.nan
     edit_df["备注"] = ""
 
-    st.markdown("**在下表中填写数量（必填），单价仅在买入 Purchase 时填写；可添加新行录入新物品 / Fill in Qty (required), Unit Price only when Status = Purchase.**")
+    st.markdown(
+        """
+        **在下表中填写数量（必填），单价仅在买入 Purchase 时填写；可添加新行录入新物品。**  
+        *Fill in quantity in the table below (required). Unit Price is only needed when Status = Purchase.  
+        You may add new rows to record new items.*
+        """
+    )
 
     edited = st.data_editor(
         edit_df.astype({"数量": "object"}),  # 明确把“数量”设为 object/str
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            "数量": st.column_config.TextColumn(help="支持 3、0.5 或 20% / Support 3, 0.5, 20%"),
-            "单价": st.column_config.NumberColumn(step=0.01, min_value=0.0) if sel_status == "买入Purchase" else None,
+            "物品名": st.column_config.TextColumn(
+                label="物品名\nItem Name"
+            ),
+            "单位": st.column_config.TextColumn(
+                label="单位\nUnit"
+            ),
+            "数量": st.column_config.TextColumn(
+                label="数量\nQty",
+                help="支持 3、0.5 或 20% / Support 3, 0.5, 20%",
+            ),
+            "单价": (
+                st.column_config.NumberColumn(
+                    label="单价\nUnit Price",
+                    step=0.01,
+                    min_value=0.0,
+                )
+                if sel_status == "买入Purchase"
+                else None  # 剩余模式下不显示单价列
+            ),
+            "备注": st.column_config.TextColumn(
+                label="备注\nNotes"
+            ),
         },
         key="bulk_editor",
     )
@@ -393,13 +419,13 @@ with tabs[0]:
                     df_check = normalize_columns_compute(df_check)
                     dd = pd.to_datetime(df_check.get("日期 (Date)"), errors="coerce").dt.date
                     names = [p["物品名 Item"] for p in preview]
-                    # 归一化后的状态：买入 / 剩余
-                    norm_status = "买入" if sel_status.startswith("买入") else "剩余"
+
                     just_now = df_check[
                         (dd == dt.date()) &
-                        (df_check.get("状态 (Status)") == norm_status) &
+                        (df_check.get("状态 (Status)") == sel_status) &
                         (df_check.get("食材名称 (Item Name)").isin(names))
                     ][["日期 (Date)","食材名称 (Item Name)","数量 (Qty)","状态 (Status)"]].copy()
+
                     st.markdown("**写入后的回读校验 / Read-back check**")
                     if just_now.empty:
                         st.warning("表里暂未读到刚写入的行（可能被表格格式/底部空白影响）。若仍未出现，请清理表底部多余格式，并确认 gsheet.append 使用 USER_ENTERED + table_range='A1'。")
@@ -605,9 +631,9 @@ with tabs[1]:
             item_df["row_order"] = item_df["__orig_idx__"]
         item_df = item_df.sort_values(["日期 (Date)", "row_order"])
 
-        # 这里使用规范化后的中文状态值：买入 / 剩余
-        rem = item_df[item_df.get("状态 (Status)") == "剩余"].copy()
-        buy = item_df[item_df.get("状态 (Status)") == "买入"].copy()
+        # 使用规范化后的状态值：买入Purchase / 剩余Remaining
+        rem = item_df[item_df.get("状态 (Status)") == "剩余Remaining"].copy()
+        buy = item_df[item_df.get("状态 (Status)") == "买入Purchase"].copy()
 
         if len(rem):
             last_rem = rem.iloc[-1]
@@ -618,7 +644,7 @@ with tabs[1]:
                 (item_df["日期 (Date)"] > last_date) |
                 ((item_df["日期 (Date)"] == last_date) & (item_df["row_order"] > last_ord))
             )
-            buys_after = item_df[mask_after & (item_df["状态 (Status)"] == "买入")]
+            buys_after = item_df[mask_after & (item_df["状态 (Status)"] == "买入Purchase")]
             cur_stock = float(last_qty + buys_after["数量 (Qty)"].sum())
         else:
             cur_stock = float(buy["数量 (Qty)"].sum()) if len(buy) else float("nan")
@@ -665,7 +691,7 @@ with tabs[1]:
             ev["dt"] = pd.to_datetime(ev["日期 (Date)"])
             status_color = alt.Color(
                 "状态 (Status):N",
-                scale=alt.Scale(domain=["买入", "剩余"], range=["#1f77b4", "#E4572E"]),
+                scale=alt.Scale(domain=["买入Purchase", "剩余Remaining"], range=["#1f77b4", "#E4572E"]),
                 legend=alt.Legend(title="状态 Status")
             )
             chart_ev = alt.Chart(ev).mark_point(filled=True, size=80).encode(
