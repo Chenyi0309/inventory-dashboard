@@ -24,11 +24,20 @@ except Exception:  # pragma: no cover
 
 
 # ======== 常量 ========
-SHEET_URL_ENV = "INVENTORY_SHEET_URL"     # .streamlit/secrets 或环境变量里配置的表格 URL
-TARGET_WS_TITLE = "购入/剩余"               # 目标工作表（tab）名
+# .streamlit/secrets 或环境变量里配置的表格 URL
+SHEET_URL_ENV = "INVENTORY_SHEET_URL"
+
+# 目标工作表（tab）名：购入/剩余记录
+TARGET_WS_TITLE = "购入/剩余Purchased/Remaining"
 
 # 主数据（库存产品）可能的工作表名（按顺序尝试）
-CATALOG_WS_TITLES = ["库存产品", "产品库", "Catalog", "Products"]
+CATALOG_WS_TITLES = [
+    "库存产品In stock products",
+    "库存产品",
+    "产品库",
+    "Catalog",
+    "Products",
+]
 
 # Sheets/Drive 权限作用域
 SCOPES = [
@@ -71,12 +80,14 @@ def _open_sheet():
 
 
 def _get_ws():
-    """获取目标 worksheet 对象。"""
+    """获取目标 worksheet 对象（购入/剩余Purchased/Remaining）。"""
     sh = _open_sheet()
     try:
         ws = sh.worksheet(TARGET_WS_TITLE)
     except gspread.WorksheetNotFound:
-        raise RuntimeError(f"找不到工作表『{TARGET_WS_TITLE}』，请在文件中创建同名工作表（tab）")
+        raise RuntimeError(
+            f"找不到工作表『{TARGET_WS_TITLE}』，请在文件中创建同名工作表（tab）"
+        )
     return ws
 
 
@@ -125,7 +136,7 @@ def bust_cache():
 
 
 def read_records() -> pd.DataFrame:
-    """读取『购入/剩余』全部数据（尽量少调，App 侧做了缓存）。"""
+    """读取『购入/剩余Purchased/Remaining』全部数据（尽量少调，App 侧做了缓存）。"""
     ws = _get_ws()
     data = ws.get_all_records()  # 以首行作为 header
     df = pd.DataFrame(data)
@@ -135,7 +146,7 @@ def read_records() -> pd.DataFrame:
 # ======== 库存产品（主数据）读取 ========
 def _open_catalog_ws():
     """
-    定位『库存产品』工作表：
+    定位『库存产品In stock products』工作表：
     1) 优先按常见表名直连；
     2) 找不到则遍历各 tab，凡是首行同时含“物品名/单位”的都视为候选。
     """
@@ -159,12 +170,14 @@ def _open_catalog_ws():
         if has_name and has_unit:
             return ws
 
-    raise RuntimeError("找不到『库存产品』工作表；请新建一个包含列「物品名 / 类型 / 单位」的工作表（默认名：库存产品）。")
+    raise RuntimeError(
+        "找不到『库存产品In stock products』工作表；请新建一个包含列「物品名 / 类型 / 单位」的工作表（默认名：库存产品In stock products）。"
+    )
 
 
 def read_catalog() -> pd.DataFrame:
     """
-    读取『库存产品』主数据：
+    读取『库存产品In stock products』主数据：
     - 返回至少包含列「物品名」「类型」「单位」的 DataFrame；
     - 自动把常见别名列统一到标准名；
     - 去空白与去重（以物品名为准）。
@@ -303,7 +316,7 @@ def _retry(operation, *, max_retries: int = 5, base_delay: float = 1.0):
 # ======== 写入：单行 & 批量 ========
 def append_record(record: Dict) -> Tuple[int, dict]:
     """
-    追加一行到『购入/剩余』。返回 (估算行号, gspread响应对象)。
+    追加一行到『购入/剩余Purchased/Remaining』。返回 (估算行号, gspread响应对象)。
     """
     ws = _get_ws()
     header = _header_cached()
@@ -342,16 +355,18 @@ def append_records_bulk(records: List[Dict]) -> dict:
     bust_cache()
     return resp
 
+
 # ======== 诊断写入（不影响统计） ========
 # 安全空实现：不再写表，只返回 True
 def try_write_probe() -> bool:
     return True
 
+
 # ======== 调试辅助：解析写回区间 & 表尾快照 ========
 def parse_updated_range_rows(resp: dict) -> Optional[Tuple[int, int]]:
     """
     从 append_rows 的返回值中解析出起止行号。
-    例：'updates': {'updatedRange': '购入/剩余!A244:I245'}
+    例：'updates': {'updatedRange': '购入/剩余Purchased/Remaining!A244:I245'}
     """
     try:
         rng = resp.get("updates", {}).get("updatedRange", "")
