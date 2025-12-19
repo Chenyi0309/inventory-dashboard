@@ -199,6 +199,17 @@ tabs = st.tabs(["➕ 录入记录 / New Entries", "📊 库存统计 / Inventory
 with tabs[0]:
     st.subheader("录入新记录 / New Record")
 
+    colL1, _ = st.columns([1, 3])
+    if colL1.button(
+        "🔄 刷新产品清单 / Refresh catalog",
+        help="清空缓存并重新读取库存产品表 / Bust cache and reload catalog"
+    ):
+        try:
+            bust_cache()
+        except Exception:
+            pass
+        st.rerun()
+
     # 读取“购入/剩余 Purchased/Remaining”用于推断已有物品（当没有主数据时）
     try:
         df_all = read_records_fn()
